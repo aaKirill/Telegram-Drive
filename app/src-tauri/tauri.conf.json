@@ -3,13 +3,13 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/caamer20/Telegram-Drive/releases/latest/download/latest.json"
+        "https://github.com/aaKirill/Telegram-Drive/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBBRkI4QUZDNjZEMzZCRTIKUldUaWE5Tm0vSXI3Q3JrRDBtY2lZYUtGL3RTR2JuUTNYSCswVjNaVURXa1FSRWRPMzNPZk92YS8K"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZGOTkwOEFDMzU3NzA3Q0YKUldUUEIzYzFyQWlaYjc0SUJyc2p1cUI2M0NNU0daMXFOemsrM3UvL1h4WUtCcHFSM2VzNG5zUTAK"
     }
   },
   "productName": "Telegram Drive",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "identifier": "com.cameronamer.telegramdrive",
   "build": {
     "beforeDevCommand": "npm run dev",

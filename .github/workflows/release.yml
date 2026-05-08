@@ -29,7 +29,7 @@ jobs:
               repo: context.repo.repo,
               tag_name: `v${{ steps.get_version.outputs.VERSION }}`,
               name: `Telegram Drive v${{ steps.get_version.outputs.VERSION }}`,
-              body: `Feature: Added a donation button and popup modal to the main login screen to support the project via PayPal, Litecoin, and Bitcoin.\n\nSee the assets below to download and install.`,
+              body: `Telegram Drive ${{ steps.get_version.outputs.VERSION }}\n\nDownload the installer for your platform from the assets below.\n\n- **macOS Apple Silicon (M1+):** \\\`Telegram Drive_${{ steps.get_version.outputs.VERSION }}_aarch64.dmg\\\`\n- **macOS Intel:** \\\`Telegram Drive_${{ steps.get_version.outputs.VERSION }}_x64.dmg\\\`\n- **Windows:** \\\`Telegram Drive_${{ steps.get_version.outputs.VERSION }}_x64-setup.exe\\\` (or the \\\`.msi\\\`)\n- **Linux:** \\\`.AppImage\\\` or \\\`.deb\\\`\n\nFirst-launch hint: macOS will say "developer cannot be verified" — right-click the app → Open. Windows SmartScreen: "More info" → "Run anyway".`,
               draft: true,
               prerelease: false
             });
