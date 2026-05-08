@@ -492,7 +492,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
             <AnimatePresence>
                 {showMoveModal && (
                     <MoveToFolderModal
-                        folders={folders}
+                        folders={folders.filter(f => !folderPrefs.get(f.id).hidden && !locks.isLocked(f.id))}
                         onClose={() => setShowMoveModal(false)}
                         onSelect={handleBulkMove}
                         activeFolderId={activeFolderId}

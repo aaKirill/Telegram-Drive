@@ -487,26 +487,67 @@ pub async fn cmd_search_global(
     Ok(files)
 }
 
+async fn match_channel_folder(
+    client: &grammers_client::Client,
+    folders: &mut Vec<FolderMetadata>,
+    id: i64,
+    name: String,
+    access_hash: i64,
+) {
+    log::debug!("[SCAN] Processing Channel: '{}' (ID: {})", name, id);
+
+    if name.to_lowercase().contains("[td]") {
+        log::info!(" -> MATCH via Title: {}", name);
+        let display_name = name
+            .replace(" [TD]", "")
+            .replace(" [td]", "")
+            .replace("[TD]", "")
+            .replace("[td]", "")
+            .trim()
+            .to_string();
+        folders.push(FolderMetadata { id, name: display_name, parent_id: None });
+        return;
+    }
+
+    let input_chan = tl::enums::InputChannel::Channel(tl::types::InputChannel {
+        channel_id: id,
+        access_hash,
+    });
+
+    match client
+        .invoke(&tl::functions::channels::GetFullChannel { channel: input_chan })
+        .await
+    {
+        Ok(tl::enums::messages::ChatFull::Full(f)) => {
+            if let tl::enums::ChatFull::Full(cf) = f.full_chat {
+                if cf.about.contains("[telegram-drive-folder]") {
+                    log::info!(" -> MATCH via About: {}", name);
+                    folders.push(FolderMetadata { id, name, parent_id: None });
+                }
+            }
+        }
+        Err(e) => log::warn!(" -> Failed to get full info: {}", e),
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_scan_folders(
     state: State<'_, TelegramState>,
 ) -> Result<Vec<FolderMetadata>, String> {
     let client_opt = { state.client.lock().await.clone() };
-    if client_opt.is_none() { 
+    if client_opt.is_none() {
         return Ok(Vec::new());
     }
     let client = client_opt.unwrap();
-    
+
     let mut folders = Vec::new();
     let mut dialogs = client.iter_dialogs();
-    
+
     log::info!("Starting Folder Scan...");
 
-    // Acquire write lock once for the entire scan to populate the peer cache
     let mut peer_cache = state.peer_cache.write().await;
 
     while let Some(dialog) = dialogs.next().await.map_err(|e| e.to_string())? {
-        // Populate peer cache for every dialog we encounter (free priming)
         match &dialog.peer {
             Peer::Channel(c) => {
                 let id = c.raw.id;
@@ -514,36 +555,7 @@ pub async fn cmd_scan_folders(
 
                 let name = c.raw.title.clone();
                 let access_hash = c.raw.access_hash.unwrap_or(0);
-                
-                log::debug!("[SCAN] Processing Channel: '{}' (ID: {})", name, id);
-
-                // Strategy 1: Title
-                if name.to_lowercase().contains("[td]") {
-                    log::info!(" -> MATCH via Title: {}", name);
-                    let display_name = name.replace(" [TD]", "").replace(" [td]", "").replace("[TD]", "").replace("[td]", "").trim().to_string();
-                    folders.push(FolderMetadata { id, name: display_name, parent_id: None });
-                    continue; 
-                }
-
-                // Strategy 2: About
-                let input_chan = tl::enums::InputChannel::Channel(tl::types::InputChannel {
-                    channel_id: c.raw.id,
-                    access_hash,
-                });
-                
-                match client.invoke(&tl::functions::channels::GetFullChannel {
-                    channel: input_chan,
-                }).await {
-                    Ok(tl::enums::messages::ChatFull::Full(f)) => {
-                        if let tl::enums::ChatFull::Full(cf) = f.full_chat {
-                             if cf.about.contains("[telegram-drive-folder]") {
-                                 log::info!(" -> MATCH via About: {}", name);
-                                 folders.push(FolderMetadata { id, name: name.clone(), parent_id: None });
-                             }
-                        }
-                    },
-                    Err(e) => log::warn!(" -> Failed to get full info: {}", e),
-                }
+                match_channel_folder(&client, &mut folders, id, name, access_hash).await;
             },
             Peer::User(u) => {
                 peer_cache.insert(u.raw.id(), dialog.peer.clone());
@@ -554,7 +566,89 @@ pub async fn cmd_scan_folders(
             }
         }
     }
-    
-    log::info!("Scan complete. Found {} folders. Peer cache size: {}.", folders.len(), peer_cache.len());
+
+    // Telegram's archive lives in folder_id=1 and isn't traversed by iter_dialogs.
+    // Walk it directly via the raw API so [TD] folders the user has archived still appear.
+    log::info!("[SCAN] Walking archive (folder_id=1)...");
+    let mut archive_offset_date = 0i32;
+    let mut archive_offset_id = 0i32;
+    let mut archive_offset_peer = tl::enums::InputPeer::Empty;
+    let mut archive_seen = 0usize;
+
+    loop {
+        let req = tl::functions::messages::GetDialogs {
+            exclude_pinned: false,
+            folder_id: Some(1),
+            offset_date: archive_offset_date,
+            offset_id: archive_offset_id,
+            offset_peer: archive_offset_peer.clone(),
+            limit: 100,
+            hash: 0,
+        };
+
+        let (dialogs_out, messages_out, users_out, chats_out, is_last) =
+            match client.invoke(&req).await.map_err(|e| e.to_string())? {
+                tl::enums::messages::Dialogs::Dialogs(d) =>
+                    (d.dialogs, d.messages, d.users, d.chats, true),
+                tl::enums::messages::Dialogs::Slice(d) => {
+                    let last = d.dialogs.len() < 100;
+                    (d.dialogs, d.messages, d.users, d.chats, last)
+                }
+                tl::enums::messages::Dialogs::NotModified(_) => break,
+            };
+
+        if dialogs_out.is_empty() {
+            break;
+        }
+        archive_seen += dialogs_out.len();
+
+        for chat in &chats_out {
+            if let tl::enums::Chat::Channel(c) = chat {
+                let id = c.id;
+                if !peer_cache.contains_key(&id) {
+                    peer_cache.insert(id, Peer::from_raw(chat.clone()));
+                }
+                let name = c.title.clone();
+                let access_hash = c.access_hash.unwrap_or(0);
+                match_channel_folder(&client, &mut folders, id, name, access_hash).await;
+            }
+        }
+
+        if is_last {
+            break;
+        }
+
+        let last_dialog = match dialogs_out.last() {
+            Some(tl::enums::Dialog::Dialog(d)) => d.clone(),
+            _ => break,
+        };
+        archive_offset_id = last_dialog.top_message;
+        archive_offset_date = messages_out.iter().find_map(|m| match m {
+            tl::enums::Message::Message(mm) if mm.id == archive_offset_id => Some(mm.date),
+            tl::enums::Message::Service(ms) if ms.id == archive_offset_id => Some(ms.date),
+            _ => None,
+        }).unwrap_or(0);
+        archive_offset_peer = match &last_dialog.peer {
+            tl::enums::Peer::User(p) => {
+                let access_hash = users_out.iter().find_map(|u| match u {
+                    tl::enums::User::User(uu) if uu.id == p.user_id => uu.access_hash,
+                    _ => None,
+                }).unwrap_or(0);
+                tl::enums::InputPeer::User(tl::types::InputPeerUser { user_id: p.user_id, access_hash })
+            }
+            tl::enums::Peer::Chat(p) =>
+                tl::enums::InputPeer::Chat(tl::types::InputPeerChat { chat_id: p.chat_id }),
+            tl::enums::Peer::Channel(p) => {
+                let access_hash = chats_out.iter().find_map(|c| match c {
+                    tl::enums::Chat::Channel(ch) if ch.id == p.channel_id => ch.access_hash,
+                    tl::enums::Chat::ChannelForbidden(ch) if ch.id == p.channel_id => Some(ch.access_hash),
+                    _ => None,
+                }).unwrap_or(0);
+                tl::enums::InputPeer::Channel(tl::types::InputPeerChannel { channel_id: p.channel_id, access_hash })
+            }
+        };
+    }
+
+    log::info!("Scan complete. Found {} folders ({} archived dialogs walked). Peer cache size: {}.", folders.len(), archive_seen, peer_cache.len());
     Ok(folders)
 }
