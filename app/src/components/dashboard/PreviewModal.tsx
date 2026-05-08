@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { X, File, ChevronLeft, ChevronRight } from 'lucide-react';
+import { X, File, ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
 import { TelegramFile } from '../../types';
 import { isImageFile } from '../../utils';
 
@@ -17,6 +18,16 @@ const previewCache = new Map<string, PreviewCacheValue>();
 const pendingPrefetch = new Set<string>();
 
 const getPreviewCacheKey = (fileId: number, folderId: number | null) => `${folderId ?? 'home'}:${fileId}`;
+
+/** Resolve the channel/peer a file actually lives in. Files served by global
+ *  search carry their own `folder_id` because they may live in a different
+ *  channel than the dashboard's currently-active folder; without this
+ *  `cmd_get_preview` would resolve the peer to Saved Messages and return
+ *  "File not found" for any cross-channel preview. */
+const effectiveFolderId = (file: TelegramFile, activeFolderId: number | null): number | null => {
+    const fid = file.folder_id;
+    return fid !== undefined && fid !== null ? fid : activeFolderId;
+};
 
 const touchPreviewCache = (key: string, value: PreviewCacheValue) => {
     if (previewCache.has(key)) previewCache.delete(key);
@@ -79,9 +90,22 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
 
     useEffect(() => {
         const load = async () => {
-            const key = getPreviewCacheKey(file.id, activeFolderId);
+            const folderId = effectiveFolderId(file, activeFolderId);
+            const key = getPreviewCacheKey(file.id, folderId);
             const shouldBypassCache = reloadNonce > 0;
             const requestId = ++latestRequestRef.current;
+
+            // For non-image files we don't render a preview — the modal shows
+            // an "Open with system app" panel that downloads on demand. Skip
+            // the eager fetch entirely so docx/epub/etc. don't surface a
+            // misleading "File not found" error before the user clicks Open.
+            if (!isImageFile(file.name)) {
+                setSrc(null);
+                setLoading(false);
+                setError(null);
+                return;
+            }
+
             const cachedSrc = shouldBypassCache ? null : getCachedPreview(key);
 
             if (cachedSrc) {
@@ -97,7 +121,7 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
             try {
                 const path = await invoke<string>('cmd_get_preview', {
                     messageId: file.id,
-                    folderId: activeFolderId
+                    folderId
                 });
                 if (requestId !== latestRequestRef.current) return;
 
@@ -128,13 +152,14 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
         const candidates = [nextFile, prevFile].filter((f): f is TelegramFile => !!f && isSafeToPrefetch(f.name));
 
         candidates.forEach((candidate) => {
-            const key = getPreviewCacheKey(candidate.id, activeFolderId);
+            const candidateFolderId = effectiveFolderId(candidate, activeFolderId);
+            const key = getPreviewCacheKey(candidate.id, candidateFolderId);
             if (getCachedPreview(key) || pendingPrefetch.has(key)) return;
 
             pendingPrefetch.add(key);
             invoke<string>('cmd_get_preview', {
                 messageId: candidate.id,
-                folderId: activeFolderId
+                folderId: candidateFolderId
             }).then((path) => {
                 if (!path) return;
                 const normalized = path.startsWith('data:') ? path : convertFileSrc(path);
@@ -222,15 +247,15 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
                     </div>
                 )}
 
-                {!loading && !error && src && (
+                {!loading && !error && (src || !isImageFile(file.name)) && (
                     <div className="flex flex-col items-center">
-                        {isImageFile(file.name) ? (
+                        {isImageFile(file.name) && src ? (
                             <img
                                 src={src}
                                 className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl bg-black"
                                 alt="Preview"
                                 onError={() => {
-                                    const key = getPreviewCacheKey(file.id, activeFolderId);
+                                    const key = getPreviewCacheKey(file.id, effectiveFolderId(file, activeFolderId));
                                     forgetPreview(key);
 
                                     if (retryCount < 1) {
@@ -246,8 +271,33 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
                             <div className="bg-[#1c1c1c] p-8 rounded-xl text-center border border-white/10 shadow-2xl">
                                 <File className="w-16 h-16 text-telegram-primary mx-auto mb-4" />
                                 <h3 className="text-xl text-white font-medium mb-2">{file.name}</h3>
-                                <p className="text-gray-400 mb-6">Preview not supported in app.</p>
-                                <p className="text-xs text-gray-500">File type: {file.name.split('.').pop()}</p>
+                                <p className="text-gray-400 mb-4">Inline preview not supported.</p>
+                                <p className="text-xs text-gray-500 mb-4">File type: {file.name.split('.').pop()}</p>
+                                <button
+                                    onClick={async () => {
+                                        try {
+                                            const path = await invoke<string>('cmd_get_preview', {
+                                                messageId: file.id,
+                                                folderId: effectiveFolderId(file, activeFolderId),
+                                            });
+                                            if (!path) {
+                                                toast.error('Could not download file');
+                                                return;
+                                            }
+                                            if (path.startsWith('data:')) {
+                                                toast.error('File returned inline; nothing to open externally');
+                                                return;
+                                            }
+                                            await invoke('cmd_open_path', { path });
+                                        } catch (e) {
+                                            toast.error(`Open failed: ${e}`);
+                                        }
+                                    }}
+                                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-telegram-primary hover:bg-telegram-primary/80 text-white text-sm transition-colors"
+                                >
+                                    <ExternalLink className="w-4 h-4" />
+                                    Open with system app
+                                </button>
                             </div>
                         )}
                     </div>

@@ -7,6 +7,7 @@ interface FileListItemProps {
     file: TelegramFile;
     selectedIds: number[];
     onFileClick: (e: React.MouseEvent, id: number) => void;
+    onFileDoubleClick?: () => void;
     handleContextMenu: (e: React.MouseEvent, file: TelegramFile) => void;
     onDragStart?: (fileId: number) => void;
     onDragEnd?: () => void;
@@ -17,7 +18,7 @@ interface FileListItemProps {
 }
 
 export function FileListItem({
-    file, selectedIds, onFileClick, handleContextMenu,
+    file, selectedIds, onFileClick, onFileDoubleClick, handleContextMenu,
     onDragStart, onDragEnd, onDrop,
     onPreview, onDownload, onDelete
 }: FileListItemProps) {
@@ -27,6 +28,10 @@ export function FileListItem({
     return (
         <div
             onClick={(e) => onFileClick(e, file.id)}
+            onDoubleClick={onFileDoubleClick}
+            onMouseDown={(e) => {
+                if (e.shiftKey) e.preventDefault();
+            }}
             onContextMenu={(e) => handleContextMenu(e, file)}
             draggable
             onDragStart={(e) => {
@@ -59,7 +64,7 @@ export function FileListItem({
                     onDrop(e, file.id);
                 }
             }}
-            className={`group grid grid-cols-[2rem_2fr_6rem_8rem] gap-4 items-center px-4 py-3 rounded-lg cursor-pointer border border-transparent transition-all hover:bg-telegram-hover 
+            className={`select-none group grid grid-cols-[2rem_2fr_6rem_8rem] gap-4 items-center px-4 py-3 rounded-lg cursor-pointer border border-transparent transition-all hover:bg-telegram-hover
                 ${selectedIds.includes(file.id) ? 'bg-telegram-primary/10 border-telegram-primary/20' : ''}
                 ${isDragOver ? 'ring-2 ring-telegram-primary bg-telegram-primary/20' : ''}
             `}

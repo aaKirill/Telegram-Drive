@@ -8,7 +8,7 @@ import { TelegramFile, BandwidthStats } from '../types';
 import { formatBytes, isMediaFile, isPdfFile } from '../utils';
 
 // Components
-import { Sidebar } from './dashboard/Sidebar';
+import { Sidebar, FolderSelection } from './dashboard/Sidebar';
 import { TopBar } from './dashboard/TopBar';
 import { FileExplorer } from './dashboard/FileExplorer';
 import { UploadQueue } from './dashboard/UploadQueue';
@@ -26,19 +26,67 @@ import { useFileOperations } from '../hooks/useFileOperations';
 import { useFileUpload } from '../hooks/useFileUpload';
 import { useFileDownload } from '../hooks/useFileDownload';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
+import { useFolderLocks, folderKey } from '../hooks/useFolderLocks';
+import { useAppSettings } from '../hooks/useAppSettings';
+import { useFolderPrefs } from '../hooks/useFolderPrefs';
+import { Settings } from './Settings';
+import { FolderLockModal } from './dashboard/FolderLockModal';
+import { useFolderKillswitch } from '../hooks/useFolderKillswitch';
 
 export function Dashboard({ onLogout }: { onLogout: () => void }) {
     const queryClient = useQueryClient();
 
 
     const {
-        store, folders, activeFolderId, setActiveFolderId, isSyncing, isConnected,
-        handleLogout, handleSyncFolders, handleCreateFolder, handleFolderDelete
+        store, folders, foldersLoaded, activeFolderId, setActiveFolderId, isSyncing, isConnected,
+        handleLogout, handleSyncFolders, handleCreateFolder, handleFolderDelete, handleReorderFolders
     } = useTelegramConnection(onLogout);
 
 
+    const [hasOpenedFolder, setHasOpenedFolder] = useState(false);
+    const [showSettings, setShowSettings] = useState(false);
+    const [pendingHiddenUnlock, setPendingHiddenUnlock] = useState<{ folderId: number; folderName: string } | null>(null);
+    const locks = useFolderLocks();
+    const { settings: appSettings, loaded: appSettingsLoaded, update: updateAppSettings } = useAppSettings();
+    const folderPrefs = useFolderPrefs();
+    const killswitch = useFolderKillswitch();
+
+    // Force "no folder open" the moment the active folder enters the locked set
+    // (covers lock-now button, password-set modal, or any other relock path).
+    useEffect(() => {
+        if (!hasOpenedFolder) return;
+        if (locks.lockedKeys.has(folderKey(activeFolderId))) {
+            setHasOpenedFolder(false);
+        }
+    }, [locks.lockedKeys, hasOpenedFolder, activeFolderId]);
+
+    const selection: FolderSelection = !hasOpenedFolder
+        ? { kind: 'none' }
+        : activeFolderId === null
+            ? { kind: 'home' }
+            : { kind: 'folder', id: activeFolderId };
+
+    const setSelection = useCallback((s: FolderSelection) => {
+        if (s.kind === 'none') {
+            setHasOpenedFolder(false);
+        } else if (s.kind === 'home') {
+            setHasOpenedFolder(true);
+            setActiveFolderId(null);
+        } else {
+            setHasOpenedFolder(true);
+            setActiveFolderId(s.id);
+        }
+    }, [setActiveFolderId]);
+
     const [previewFile, setPreviewFile] = useState<TelegramFile | null>(null);
-    const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+    // viewMode is derived directly from app settings — no local copy. The
+    // TopBar toggle and the Settings page "Default view" selector both go
+    // through updateAppSettings('defaultView', ...) so the rendered view is
+    // always in sync with what's persisted.
+    const viewMode = appSettings.defaultView;
+    const setViewMode = useCallback((mode: 'grid' | 'list') => {
+        if (appSettingsLoaded) updateAppSettings('defaultView', mode);
+    }, [appSettingsLoaded, updateAppSettings]);
     const [selectedIds, setSelectedIds] = useState<number[]>([]);
     const [showMoveModal, setShowMoveModal] = useState(false);
     const [searchTerm, setSearchTerm] = useState("");
@@ -46,6 +94,15 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
     const [isSearching, setIsSearching] = useState(false);
     const [internalDragFileId, _setInternalDragFileId] = useState<number | null>(null);
     const internalDragRef = useRef<number | null>(null);
+    /** Anchor for shift-click range selection — the last id selected via a
+     *  plain or cmd-click. Cleared when the visible folder changes. */
+    const selectionAnchorRef = useRef<number | null>(null);
+    /** True when the anchor was set via a cmd/ctrl-click. The next shift-click
+     *  pivots from that anchor *additively*, even without cmd held — so the
+     *  user can select 1-7, cmd-click 9, shift-click 12 and end up with
+     *  1-7 + 9-12. Plain-click anchors keep the standard replace-on-shift
+     *  behaviour. */
+    const anchorIsAdditiveRef = useRef<boolean>(false);
 
     const setInternalDragFileId = (id: number | null) => {
         internalDragRef.current = id;
@@ -56,34 +113,55 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
     const [previewContextFiles, setPreviewContextFiles] = useState<TelegramFile[]>([]);
     const [previewContextIndex, setPreviewContextIndex] = useState(-1);
 
+    // Drop any folder-lock entries that point at folders the user no longer
+    // has — leftovers from delete-folder paths that ran before the cleanup
+    // fix landed, or from deletes on other devices. Without this, the
+    // "Show locked (N)" sidebar pill keeps counting ghosts.
+    //
+    // CRITICAL: gate on foldersLoaded. The folder list is loaded async from
+    // the persistent store; if we prune before it's populated, validFolderIds
+    // is empty and we wipe every legitimate password — including ones the
+    // user just set.
+    const prunedRef = useRef(false);
     useEffect(() => {
-        if (store) {
-            store.get<'grid' | 'list'>('viewMode').then((saved) => {
-                if (saved) setViewMode(saved);
-            });
-        }
-    }, [store]);
-
-    useEffect(() => {
-        if (store) {
-            store.set('viewMode', viewMode).then(() => store.save());
-        }
-    }, [store, viewMode]);
+        if (prunedRef.current) return;
+        if (!foldersLoaded) return;
+        prunedRef.current = true;
+        invoke<number>('cmd_prune_orphan_locks', {
+            validFolderIds: folders.map(f => f.id),
+        }).then((removed) => {
+            if (removed > 0) locks.refresh();
+        }).catch(() => {});
+    }, [foldersLoaded, folders, locks]);
 
 
     const { data: allFiles = [], isLoading, error } = useQuery({
-        queryKey: ['files', activeFolderId],
+        queryKey: ['files', activeFolderId, hasOpenedFolder],
         queryFn: () => invoke<any[]>('cmd_get_files', { folderId: activeFolderId }).then(res => res.map(f => ({
             ...f,
             sizeStr: formatBytes(f.size),
             type: f.icon_type || (f.name.endsWith('/') ? 'folder' : 'file')
         }))),
-        enabled: !!store,
+        enabled: !!store && hasOpenedFolder,
     });
 
-    const displayedFiles = searchTerm.length > 2
-        ? searchResults
-        : allFiles.filter((f: TelegramFile) => f.name.toLowerCase().includes(searchTerm.toLowerCase()));
+    const displayedFiles = (() => {
+        const lower = searchTerm.toLowerCase().trim();
+        if (!lower) return allFiles;
+        const local = allFiles.filter((f: TelegramFile) => f.name.toLowerCase().includes(lower));
+        if (lower.length <= 2) return local;
+        const localIds = new Set(local.map(f => f.id));
+        // Telegram's messages.searchGlobal spans every chat, not just [TD]
+        // folders, so without this filter the user sees random files from
+        // unrelated DMs and channels. Intersect with the known folder set.
+        const driveFolderIds = new Set(folders.map(f => f.id));
+        const extra = searchResults.filter(f =>
+            !localIds.has(f.id)
+            && f.folder_id != null
+            && driveFolderIds.has(f.folder_id)
+        );
+        return [...local, ...extra];
+    })();
 
     const { data: bandwidth } = useQuery({
         queryKey: ['bandwidth'],
@@ -162,6 +240,8 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
         setPdfFile(null);
         setPreviewContextFiles([]);
         setPreviewContextIndex(-1);
+        selectionAnchorRef.current = null;
+        anchorIsAdditiveRef.current = false;
     }, [activeFolderId]);
 
 
@@ -184,18 +264,72 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
 
 
-    const handleFileClick = (e: React.MouseEvent, id: number) => {
+    const handleFileClick = (e: React.MouseEvent, id: number, orderedIds?: number[]) => {
         e.stopPropagation();
+
+        // Shift-click extends from the anchor to the clicked item along
+        // whatever ordering FileExplorer is showing right now (sorted +
+        // type-filtered). Falls back to displayedFiles only if no ordering
+        // was passed (e.g. a future caller that doesn't supply it yet).
+        const visibleIds = orderedIds && orderedIds.length > 0
+            ? orderedIds
+            : displayedFiles.map((f) => f.id);
+        const anchor = selectionAnchorRef.current;
+        if (e.shiftKey && anchor !== null && anchor !== id) {
+            const startIdx = visibleIds.indexOf(anchor);
+            const endIdx = visibleIds.indexOf(id);
+            if (startIdx !== -1 && endIdx !== -1) {
+                const [lo, hi] = startIdx <= endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+                const range = visibleIds.slice(lo, hi + 1);
+                const additive = e.metaKey || e.ctrlKey || anchorIsAdditiveRef.current;
+                if (additive) {
+                    setSelectedIds((prev) => Array.from(new Set([...prev, ...range])));
+                } else {
+                    setSelectedIds(range);
+                }
+                // Anchor stays put so further shift-clicks pivot off the
+                // same starting item, which is the standard Finder/Explorer behaviour.
+                return;
+            }
+        }
+
         if (e.metaKey || e.ctrlKey) {
-            setSelectedIds(ids => ids.includes(id) ? ids.filter(i => i !== id) : [...ids, id]);
+            setSelectedIds((ids) => (ids.includes(id) ? ids.filter((i) => i !== id) : [...ids, id]));
+            anchorIsAdditiveRef.current = true;
+        } else if (
+            // After "Select All", a plain click on an item should peel that one
+            // off the selection rather than collapse to single-select. Mental
+            // model: "everything's checked, click takes one off." Detected by
+            // selection covering every visible id.
+            visibleIds.length > 0
+            && selectedIds.length === visibleIds.length
+            && selectedIds.includes(id)
+        ) {
+            setSelectedIds((ids) => ids.filter((i) => i !== id));
+            anchorIsAdditiveRef.current = true;
         } else {
             setSelectedIds([id]);
+            anchorIsAdditiveRef.current = false;
         }
-    }
+        selectionAnchorRef.current = id;
+    };
 
     const handleToggleSelection = useCallback((id: number) => {
         setSelectedIds(ids => ids.includes(id) ? ids.filter(i => i !== id) : [...ids, id]);
+        selectionAnchorRef.current = id;
+        anchorIsAdditiveRef.current = true;
     }, []);
+
+    /** Double-click on a card opens it: folders navigate in, files preview.
+     *  The preceding single-click already updated selection state, so this
+     *  is purely an "open" action. */
+    const handleFileDoubleClick = (file: TelegramFile, orderedFiles: TelegramFile[]) => {
+        if (file.type === 'folder') {
+            setActiveFolderId(file.id);
+        } else {
+            handlePreview(file, orderedFiles);
+        }
+    };
 
     const handlePreview = (file: TelegramFile, orderedFiles?: TelegramFile[]) => {
         const contextFiles = (orderedFiles || displayedFiles).filter((f) => f.type !== 'folder');
@@ -320,9 +454,11 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
         }
     }
 
-    const currentFolderName = activeFolderId === null
-        ? "Saved Messages"
-        : folders.find(f => f.id === activeFolderId)?.name || "Folder";
+    const currentFolderName = !hasOpenedFolder
+        ? null
+        : activeFolderId === null
+            ? "Saved Messages"
+            : folders.find(f => f.id === activeFolderId)?.name || "Folder";
 
 
     const handleRootDragOver = (e: React.DragEvent) => {
@@ -390,18 +526,67 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                 {isDragging && internalDragFileId === null && <DragDropOverlay key="drag-drop-overlay" />}
             </AnimatePresence>
 
+            {pendingHiddenUnlock && (
+                <FolderLockModal
+                    mode="unlock"
+                    folderName={pendingHiddenUnlock.folderName}
+                    folderId={pendingHiddenUnlock.folderId}
+                    onClose={() => setPendingHiddenUnlock(null)}
+                    onSubmit={async (password) => {
+                        const ok = await locks.unlock(pendingHiddenUnlock.folderId, password);
+                        if (ok) {
+                            setSelection({ kind: 'folder', id: pendingHiddenUnlock.folderId });
+                            setSearchTerm("");
+                        } else {
+                            await killswitch.check(pendingHiddenUnlock.folderId);
+                        }
+                        return ok;
+                    }}
+                />
+            )}
+
+            {showSettings && (
+                <div className="fixed inset-0 z-50 bg-telegram-bg">
+                    <Settings
+                        onClose={() => setShowSettings(false)}
+                        folders={folders}
+                        bandwidth={bandwidth || null}
+                        locks={locks}
+                    />
+                </div>
+            )}
+
             <Sidebar
                 folders={folders}
-                activeFolderId={activeFolderId}
-                setActiveFolderId={setActiveFolderId}
+                hiddenFolderIds={new Set(folders.filter(f => folderPrefs.get(f.id).hidden).map(f => f.id))}
+                selection={selection}
+                setSelection={setSelection}
                 onDrop={handleDropOnFolder}
-                onDelete={handleFolderDelete}
-                onCreate={handleCreateFolder}
+                onDelete={async (id, name) => {
+                    await handleFolderDelete(id, name);
+                    // Backend forgets the lock entry on delete; refresh the
+                    // frontend cache so the "X locked" sidebar pill drops too.
+                    await locks.refresh();
+                }}
+                onReorderFolders={handleReorderFolders}
+                onCreate={async (name, options) => {
+                    const created = await handleCreateFolder(name);
+                    if (created) {
+                        const patch: { hideThumbnails?: boolean; hidden?: boolean } = {};
+                        if (appSettings.hideThumbnailsForNewFolders) patch.hideThumbnails = true;
+                        if (options?.hidden) patch.hidden = true;
+                        if (Object.keys(patch).length > 0) {
+                            await folderPrefs.update(created.id, patch);
+                        }
+                    }
+                    return created;
+                }}
                 isSyncing={isSyncing}
                 isConnected={isConnected}
                 onSync={handleSyncFolders}
                 onLogout={handleLogout}
                 bandwidth={bandwidth || null}
+                locks={locks}
             />
 
             <main className="flex-1 flex flex-col" onClick={(e) => { if (e.target === e.currentTarget) setSelectedIds([]); }}>
@@ -412,37 +597,99 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                     onBulkDownload={handleBulkDownload}
                     onBulkDelete={handleBulkDelete}
                     onDownloadFolder={handleDownloadFolder}
+                    onStartClick={() => setSelection({ kind: 'none' })}
+                    onSelectAll={handleSelectAll}
+                    onDeselectAll={() => setSelectedIds([])}
+                    onOpenSettings={() => setShowSettings(true)}
+                    hasFiles={displayedFiles.length > 0}
+                    totalFiles={displayedFiles.length}
                     viewMode={viewMode}
                     setViewMode={setViewMode}
                     searchTerm={searchTerm}
                     onSearchChange={setSearchTerm}
                 />
-                {searchTerm.length > 2 && (
-                    <div className="px-6 pt-4 pb-0">
-                        <h2 className="text-sm font-medium text-telegram-subtext">
-                            Search Results for <span className="text-telegram-primary">"{searchTerm}"</span>
-                        </h2>
+                {(() => {
+                    const trimmed = searchTerm.trim();
+                    if (!trimmed) return null;
+                    // Exact, CASE-SENSITIVE match on a hidden folder reveals it
+                    // as an "Open" banner. Substring/fuzzy/case-insensitive
+                    // matches don't surface hidden folders — that's the whole
+                    // point of "hidden". Typing "MyFolder" reveals it; typing
+                    // "myfolder" or "my" does not.
+                    const hiddenMatch = folders.find(f =>
+                        folderPrefs.get(f.id).hidden && f.name === trimmed
+                    );
+                    return (
+                        <>
+                            {hiddenMatch && (
+                                <div className="px-6 pt-4">
+                                    <button
+                                        onClick={() => {
+                                            // Sidebar's handleFolderClick gates locked folders behind
+                                            // an unlock prompt; replicate that here since the hidden-
+                                            // folder reveal banner bypasses the sidebar entirely.
+                                            const key = folderKey(hiddenMatch.id);
+                                            if (locks.lockedKeys.has(key)) {
+                                                setPendingHiddenUnlock({ folderId: hiddenMatch.id, folderName: hiddenMatch.name });
+                                            } else {
+                                                setSelection({ kind: 'folder', id: hiddenMatch.id });
+                                            }
+                                        }}
+                                        className="w-full flex items-center justify-between px-4 py-2 rounded-md bg-telegram-primary/10 hover:bg-telegram-primary/20 border border-telegram-primary/30 text-telegram-primary transition-colors"
+                                    >
+                                        <span className="text-sm">Open hidden folder <span className="font-semibold">"{hiddenMatch.name}"</span></span>
+                                        <span className="text-xs">→</span>
+                                    </button>
+                                </div>
+                            )}
+                            {trimmed.length > 2 && (
+                                <div className="px-6 pt-4 pb-0">
+                                    <h2 className="text-sm font-medium text-telegram-subtext">
+                                        Search Results for <span className="text-telegram-primary">"{searchTerm}"</span>
+                                    </h2>
+                                </div>
+                            )}
+                        </>
+                    );
+                })()}
+                {!hasOpenedFolder ? (
+                    <div className="flex-1 flex flex-col items-center justify-center text-center text-telegram-subtext p-6">
+                        <div className="text-base">No folder open.</div>
+                        <div className="text-sm mt-1">Select a folder from the sidebar to view its files.</div>
                     </div>
-                )}
-                <FileExplorer
+                ) : (
+                    <FileExplorer
 
-                    files={displayedFiles}
-                    loading={isLoading || isSearching}
-                    error={error}
-                    viewMode={viewMode}
-                    selectedIds={selectedIds}
-                    activeFolderId={activeFolderId}
-                    onFileClick={handleFileClick}
-                    onDelete={handleDelete}
-                    onDownload={(id, name) => queueDownload(id, name, activeFolderId)}
-                    onPreview={handlePreview}
-                    onManualUpload={handleManualUpload}
-                    onSelectionClear={() => setSelectedIds([])}
-                    onToggleSelection={handleToggleSelection}
-                    onDrop={handleDropOnFolder}
-                    onDragStart={(fileId) => setInternalDragFileId(fileId)}
-                    onDragEnd={() => setTimeout(() => setInternalDragFileId(null), 50)}
-                />
+                        files={displayedFiles}
+                        loading={isLoading || isSearching}
+                        error={error}
+                        viewMode={viewMode}
+                        selectedIds={selectedIds}
+                        activeFolderId={activeFolderId}
+                        onFileClick={handleFileClick}
+                        onFileDoubleClick={handleFileDoubleClick}
+                        disableThumbnailFor={(file) => {
+                            if (appSettings.hideThumbnailsGlobal) return true;
+                            const folderId = file.folder_id ?? activeFolderId;
+                            return !!folderPrefs.get(folderId).hideThumbnails;
+                        }}
+                        sortField={appSettings.defaultSortField}
+                        sortDirection={appSettings.defaultSortDir}
+                        onSortChange={(field, dir) => {
+                            updateAppSettings('defaultSortField', field);
+                            updateAppSettings('defaultSortDir', dir);
+                        }}
+                        onDelete={handleDelete}
+                        onDownload={(id, name) => queueDownload(id, name, activeFolderId)}
+                        onPreview={handlePreview}
+                        onManualUpload={handleManualUpload}
+                        onSelectionClear={() => setSelectedIds([])}
+                        onToggleSelection={handleToggleSelection}
+                        onDrop={handleDropOnFolder}
+                        onDragStart={(fileId) => setInternalDragFileId(fileId)}
+                        onDragEnd={() => setTimeout(() => setInternalDragFileId(null), 50)}
+                    />
+                )}
             </main>
 
             {previewFile && (

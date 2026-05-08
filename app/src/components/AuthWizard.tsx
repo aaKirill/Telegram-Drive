@@ -125,11 +125,19 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
             const idInt = parseInt(apiId, 10);
             if (isNaN(idInt)) throw new Error("API ID must be a number");
 
-            await invoke("cmd_auth_request_code", {
+            const result = await invoke<string>("cmd_auth_request_code", {
                 phone,
                 apiId: idInt,
                 apiHash: apiHash
             });
+            // Backend short-circuits with "already_authorized" when the loaded
+            // session is already signed in — skip the code step entirely so we
+            // don't strand the user on a screen waiting for a code that was
+            // never sent.
+            if (result === "already_authorized") {
+                onLogin();
+                return;
+            }
             setStep("code");
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : JSON.stringify(err);
@@ -198,7 +206,7 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
             >
                 <div className="text-center mb-8">
                     <div className="w-20 h-20 mb-6 mx-auto flex items-center justify-center filter drop-shadow-lg">
-                        <img src="/logo.svg" alt="Logo" className="w-full h-full" />
+                        <img src="/logo.png" alt="Logo" className="w-full h-full" />
                     </div>
                     <h1 className="text-2xl font-bold text-white mb-1 tracking-tight">Telegram Drive</h1>
                     <p className="text-sm text-white/60 font-medium">Self-Hosted Secure Storage</p>

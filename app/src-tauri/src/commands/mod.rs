@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use grammers_client::{Client};
@@ -25,6 +26,15 @@ pub struct TelegramState {
     /// Populated lazily on first resolve_peer call, eagerly during cmd_scan_folders.
     /// Cleared on logout.
     pub peer_cache: Arc<tokio::sync::RwLock<HashMap<i64, Peer>>>,
+    /// True if the local app passcode (if any is set) has been verified for
+    /// this session. When `false` and a passcode is configured on disk, all
+    /// session-touching commands refuse to run. Cleared on app start.
+    pub passcode_unlocked: Arc<AtomicBool>,
+    /// Argon2id-derived key from the user's passcode, kept in memory only
+    /// while the app is unlocked. Used by the RunEvent::Exit handler to
+    /// re-encrypt the live `telegram.session` on graceful shutdown without
+    /// re-prompting the user. Zeroized on logout / re-lock.
+    pub passcode_key: Arc<std::sync::Mutex<Option<[u8; 32]>>>,
 }
 
 pub mod auth;
@@ -33,6 +43,8 @@ pub mod preview;
 pub mod utils;
 pub mod network;
 pub mod streaming;
+pub mod locks;
+pub mod passcode;
 
 pub use auth::*;
 pub use fs::*;
@@ -40,3 +52,5 @@ pub use preview::*;
 pub use utils::*;
 pub use network::*;
 pub use streaming::*;
+pub use locks::*;
+pub use passcode::*;

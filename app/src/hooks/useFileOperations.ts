@@ -13,10 +13,26 @@ export function useFileOperations(
     const queryClient = useQueryClient();
     const { confirm } = useConfirm();
 
+    /** Drop the given ids from any cached `['files', activeFolderId, ...]` lists.
+     *  Telegram's GetHistory has a brief read-after-write delay where a deleted
+     *  message can still appear in `iter_messages` for a few hundred ms after
+     *  delete_messages returns Ok — without optimistic removal, the UI seems
+     *  to ignore the delete until refetchOnWindowFocus fires on alt-tab. */
+    const removeIdsFromCache = (ids: number[]) => {
+        if (ids.length === 0) return;
+        const ids_set = new Set(ids);
+        queryClient.setQueriesData(
+            { queryKey: ['files', activeFolderId] },
+            (old: TelegramFile[] | undefined) =>
+                Array.isArray(old) ? old.filter((f) => !ids_set.has(f.id)) : old,
+        );
+    };
+
     const handleDelete = async (id: number) => {
         if (!await confirm({ title: "Delete File", message: "Are you sure you want to delete this file?", confirmText: "Delete", variant: 'danger' })) return;
         try {
             await invoke('cmd_delete_file', { messageId: id, folderId: activeFolderId });
+            removeIdsFromCache([id]);
             queryClient.invalidateQueries({ queryKey: ['files', activeFolderId] });
             toast.success("File deleted");
         } catch (e) {
@@ -30,15 +46,18 @@ export function useFileOperations(
 
         let success = 0;
         let fail = 0;
+        const successfullyDeleted: number[] = [];
         for (const id of selectedIds) {
             try {
                 await invoke('cmd_delete_file', { messageId: id, folderId: activeFolderId });
+                successfullyDeleted.push(id);
                 success++;
             } catch {
                 fail++;
             }
         }
         setSelectedIds([]);
+        removeIdsFromCache(successfullyDeleted);
         queryClient.invalidateQueries({ queryKey: ['files', activeFolderId] });
         if (success > 0) toast.success(`Deleted ${success} files.`);
         if (fail > 0) toast.error(`Failed to delete ${fail} files.`);
@@ -85,6 +104,7 @@ export function useFileOperations(
 
     const handleBulkMove = async (targetFolderId: number | null, onSuccess?: () => void) => {
         if (selectedIds.length === 0) return;
+        const movedIds = [...selectedIds];
         try {
             await invoke('cmd_move_files', {
                 messageIds: selectedIds,
@@ -92,7 +112,9 @@ export function useFileOperations(
                 targetFolderId: targetFolderId
             });
             toast.success(`Moved ${selectedIds.length} files.`);
+            removeIdsFromCache(movedIds);
             queryClient.invalidateQueries({ queryKey: ['files', activeFolderId] });
+            queryClient.invalidateQueries({ queryKey: ['files', targetFolderId] });
             setSelectedIds([]);
             if (onSuccess) onSuccess();
         } catch {

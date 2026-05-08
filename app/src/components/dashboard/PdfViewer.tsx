@@ -21,7 +21,7 @@ interface PdfViewerProps {
 }
 
 export function PdfViewer({ file, onClose, onNext, onPrev, currentIndex, totalItems, activeFolderId }: PdfViewerProps) {
-    const [streamToken, setStreamToken] = useState<string | null>(null);
+    const [streamInfo, setStreamInfo] = useState<{ token: string; base_url: string } | null>(null);
     const [pdf, setPdf] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
     const [numPages, setNumPages] = useState<number>(0);
     const [scale, setScale] = useState<number>(1.2);
@@ -30,17 +30,17 @@ export function PdfViewer({ file, onClose, onNext, onPrev, currentIndex, totalIt
     const containerRef = useRef<HTMLDivElement>(null);
     const pdfRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
 
-    // Fetch stream token once
+    // Fetch stream info once
     useEffect(() => {
-        invoke<string>('cmd_get_stream_token').then(setStreamToken).catch((err) => {
-            console.error("Failed to get stream token:", err);
+        invoke<{ token: string; base_url: string }>('cmd_get_stream_info').then(setStreamInfo).catch((err) => {
+            console.error("Failed to get stream info:", err);
             setError("Failed to initialize stream");
         });
     }, []);
 
     // Load PDF document when stream URL is ready or file changes
     useEffect(() => {
-        if (!streamToken) return;
+        if (!streamInfo) return;
 
         let cancelled = false;
         setLoading(true);
@@ -48,8 +48,12 @@ export function PdfViewer({ file, onClose, onNext, onPrev, currentIndex, totalIt
         setPdf(null);
         setNumPages(0);
 
-        const folderIdParam = activeFolderId !== null ? activeFolderId.toString() : 'home';
-        const streamUrl = `http://localhost:14200/stream/${folderIdParam}/${file.id}?token=${streamToken}`;
+        // Honour the file's own folder_id when set (global search results may
+        // live in a different channel than the currently-active folder).
+        const fileFolderId =
+            file.folder_id !== undefined && file.folder_id !== null ? file.folder_id : activeFolderId;
+        const folderIdParam = fileFolderId !== null ? fileFolderId.toString() : 'home';
+        const streamUrl = `${streamInfo.base_url}/stream/${folderIdParam}/${file.id}?token=${streamInfo.token}`;
 
         const loadingTask = pdfjsLib.getDocument(streamUrl);
 
@@ -80,7 +84,7 @@ export function PdfViewer({ file, onClose, onNext, onPrev, currentIndex, totalIt
             cancelled = true;
             loadingTask.destroy();
         };
-    }, [streamToken, activeFolderId, file.id]);
+    }, [streamInfo, activeFolderId, file.id]);
 
     // Cleanup PDF document on unmount
     useEffect(() => {

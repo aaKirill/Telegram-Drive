@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { check, Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { useAppSettings } from './useAppSettings';
 
 interface UpdateState {
     checking: boolean;
@@ -21,6 +22,7 @@ export function useUpdateCheck() {
         version: null,
     });
     const [update, setUpdate] = useState<Update | null>(null);
+    const { settings, loaded: settingsLoaded } = useAppSettings();
 
     const checkForUpdates = useCallback(async () => {
         setState(s => ({ ...s, checking: true, error: null }));
@@ -86,11 +88,12 @@ export function useUpdateCheck() {
     }, []);
 
     useEffect(() => {
+        if (!settingsLoaded || !settings.updateCheckEnabled) return;
         const timer = setTimeout(() => {
             checkForUpdates();
         }, 5000);
         return () => clearTimeout(timer);
-    }, [checkForUpdates]);
+    }, [checkForUpdates, settingsLoaded, settings.updateCheckEnabled]);
 
     return {
         ...state,

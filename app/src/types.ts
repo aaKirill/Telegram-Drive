@@ -3,6 +3,12 @@ export interface TelegramFile {
     name: string;
     size: number;
     sizeStr: string; // Formatted size
+    /** Channel/peer the message lives in. Comes through as snake_case from
+     *  the Rust backend (FileMetadata serde derive without rename_all).
+     *  May differ from the dashboard's `activeFolderId` when files come
+     *  from a global search across [TD] channels — always pair with
+     *  `?? activeFolderId` to fall back to the current view. */
+    folder_id?: number | null;
     created_at?: string;
     type?: 'folder' | 'file'; // implied icon_type
     // Add other fields if backend sends them

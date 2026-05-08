@@ -6,9 +6,18 @@ import { EmptyState } from './EmptyState';
 import { TelegramFile } from '../../types';
 import { ContextMenu } from './ContextMenu';
 import { FileListItem } from './FileListItem';
+import { categorizeFile, FileTypeCategory } from '../../utils';
 
 type SortField = 'name' | 'size' | 'date';
-type SortDirection = 'asc' | 'desc';
+type ConcreteCategory = Exclude<FileTypeCategory, 'all'>;
+
+const TYPE_FILTERS: { value: ConcreteCategory; label: string }[] = [
+    { value: 'image', label: 'Images' },
+    { value: 'video', label: 'Videos' },
+    { value: 'audio', label: 'Audio' },
+    { value: 'document', label: 'Documents' },
+    { value: 'other', label: 'Other' },
+];
 
 interface FileExplorerProps {
     files: TelegramFile[];
@@ -17,7 +26,12 @@ interface FileExplorerProps {
     viewMode: 'grid' | 'list';
     selectedIds: number[];
     activeFolderId: number | null;
-    onFileClick: (e: React.MouseEvent, id: number) => void;
+    /** Called on every card/list click. The third argument is the ids of every
+     *  visible file in current sort+filter order — Dashboard uses it to slice
+     *  shift-click ranges along what the user actually sees, not the raw
+     *  unsorted upstream list. */
+    onFileClick: (e: React.MouseEvent, id: number, orderedIds: number[]) => void;
+    onFileDoubleClick?: (file: TelegramFile, orderedFiles: TelegramFile[]) => void;
     onDelete: (id: number) => void;
     onDownload: (id: number, name: string) => void;
     onPreview: (file: TelegramFile, orderedFiles?: TelegramFile[]) => void;
@@ -27,6 +41,10 @@ interface FileExplorerProps {
     onDrop?: (e: React.DragEvent, folderId: number) => void;
     onDragStart?: (fileId: number) => void;
     onDragEnd?: () => void;
+    disableThumbnailFor?: (file: TelegramFile) => boolean;
+    sortField: 'name' | 'size' | 'date';
+    sortDirection: 'asc' | 'desc';
+    onSortChange: (field: 'name' | 'size' | 'date', direction: 'asc' | 'desc') => void;
 }
 
 
@@ -58,11 +76,19 @@ function useGridColumns(containerRef: React.RefObject<HTMLDivElement | null>) {
 
 export function FileExplorer({
     files, loading, error, viewMode, selectedIds, activeFolderId,
-    onFileClick, onDelete, onDownload, onPreview, onManualUpload, onSelectionClear, onToggleSelection, onDrop, onDragStart, onDragEnd
+    onFileClick, onFileDoubleClick, onDelete, onDownload, onPreview, onManualUpload, onSelectionClear, onToggleSelection, onDrop, onDragStart, onDragEnd, disableThumbnailFor,
+    sortField, sortDirection, onSortChange
 }: FileExplorerProps) {
-    const [sortField, setSortField] = useState<SortField>('name');
-    const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
+    const [typeFilters, setTypeFilters] = useState<Set<ConcreteCategory>>(new Set());
     const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: TelegramFile } | null>(null);
+
+    const toggleTypeFilter = (cat: ConcreteCategory) => {
+        setTypeFilters(prev => {
+            const next = new Set(prev);
+            if (next.has(cat)) next.delete(cat); else next.add(cat);
+            return next;
+        });
+    };
 
     const parentRef = useRef<HTMLDivElement>(null);
     const { columns, containerWidth } = useGridColumns(parentRef);
@@ -79,7 +105,11 @@ export function FileExplorer({
     }, []);
 
     const sortedFiles = useMemo(() => {
-        return [...files].sort((a, b) => {
+        const filtered = typeFilters.size === 0
+            ? files
+            : files.filter((f) => f.type === 'folder' || typeFilters.has(categorizeFile(f.name)));
+
+        return [...filtered].sort((a, b) => {
             let comparison = 0;
             switch (sortField) {
                 case 'name':
@@ -94,16 +124,34 @@ export function FileExplorer({
             }
             return sortDirection === 'asc' ? comparison : -comparison;
         });
-    }, [files, sortField, sortDirection]);
+    }, [files, sortField, sortDirection, typeFilters]);
 
     const handlePreviewRequest = useCallback((file: TelegramFile) => {
         onPreview(file, sortedFiles);
     }, [onPreview, sortedFiles]);
 
+    /** All visible file ids in current display order. Always pass this to
+     *  the click handler so shift-click range selection slices the same
+     *  sequence the user sees. */
+    const visibleOrderedIds = useMemo(
+        () => sortedFiles.map((f) => f.id),
+        [sortedFiles],
+    );
+    const handleFileClickWithOrder = useCallback(
+        (e: React.MouseEvent, id: number) => onFileClick(e, id, visibleOrderedIds),
+        [onFileClick, visibleOrderedIds],
+    );
+    const handleFileDoubleClickWithOrder = useCallback(
+        (file: TelegramFile) => {
+            if (onFileDoubleClick) onFileDoubleClick(file, sortedFiles);
+        },
+        [onFileDoubleClick, sortedFiles],
+    );
+
 
     const gridRows = useMemo(() => {
         const rows: (TelegramFile | 'upload')[][] = [];
-        const itemsWithUpload: (TelegramFile | 'upload')[] = [...sortedFiles, 'upload'];
+        const itemsWithUpload: (TelegramFile | 'upload')[] = ['upload', ...sortedFiles];
         for (let i = 0; i < itemsWithUpload.length; i += columns) {
             rows.push(itemsWithUpload.slice(i, i + columns));
         }
@@ -112,7 +160,7 @@ export function FileExplorer({
 
 
     const listItems = useMemo(() => {
-        return activeFolderId === null ? [...sortedFiles, 'upload' as const] : sortedFiles;
+        return activeFolderId === null ? ['upload' as const, ...sortedFiles] : sortedFiles;
     }, [sortedFiles, activeFolderId]);
 
 
@@ -138,10 +186,9 @@ export function FileExplorer({
 
     const handleSort = (field: SortField) => {
         if (sortField === field) {
-            setSortDirection(d => d === 'asc' ? 'desc' : 'asc');
+            onSortChange(field, sortDirection === 'asc' ? 'desc' : 'asc');
         } else {
-            setSortField(field);
-            setSortDirection('asc');
+            onSortChange(field, 'asc');
         }
     };
 
@@ -184,7 +231,7 @@ export function FileExplorer({
             {viewMode === 'grid' ? (
                 <>
 
-                    <div className="flex items-center gap-2 mb-4 text-xs text-telegram-subtext">
+                    <div className="flex items-center gap-2 mb-4 text-xs text-telegram-subtext flex-wrap">
                         <span>Sort by:</span>
                         <button
                             onClick={() => handleSort('name')}
@@ -204,6 +251,24 @@ export function FileExplorer({
                         >
                             Date <SortIcon field="date" />
                         </button>
+                        <div className="ml-auto flex items-center gap-2 flex-wrap">
+                            <span>Type:</span>
+                            <button
+                                onClick={() => setTypeFilters(new Set())}
+                                className={`px-2 py-1 rounded hover:bg-white/5 ${typeFilters.size === 0 ? 'text-telegram-primary bg-white/5' : ''}`}
+                            >
+                                All
+                            </button>
+                            {TYPE_FILTERS.map((opt) => (
+                                <button
+                                    key={opt.value}
+                                    onClick={() => toggleTypeFilter(opt.value)}
+                                    className={`px-2 py-1 rounded hover:bg-white/5 ${typeFilters.has(opt.value) ? 'text-telegram-primary bg-white/5' : ''}`}
+                                >
+                                    {opt.label}
+                                </button>
+                            ))}
+                        </div>
                     </div>
 
 
@@ -234,7 +299,7 @@ export function FileExplorer({
                                                     style={{ height: `${cardHeight}px` }}
                                                 >
                                                     <Plus className="w-8 h-8 mb-2 group-hover:scale-110 transition-transform" />
-                                                    <span className="text-sm font-medium">Upload File</span>
+                                                    <span className="text-sm font-medium">Upload Files</span>
                                                 </button>
                                             );
                                         }
@@ -244,7 +309,8 @@ export function FileExplorer({
                                                 key={file.id}
                                                 file={file}
                                                 isSelected={selectedIds.includes(file.id)}
-                                                onClick={(e) => onFileClick(e, file.id)}
+                                                onClick={(e) => handleFileClickWithOrder(e, file.id)}
+                                                onDoubleClick={() => handleFileDoubleClickWithOrder(file)}
                                                 onContextMenu={(e) => handleContextMenu(e, file)}
                                                 onDelete={() => onDelete(file.id)}
                                                 onDownload={() => onDownload(file.id, file.name)}
@@ -255,6 +321,7 @@ export function FileExplorer({
                                                 activeFolderId={activeFolderId}
                                                 height={cardHeight}
                                                 onToggleSelection={() => onToggleSelection(file.id)}
+                                                disableThumbnail={disableThumbnailFor ? disableThumbnailFor(file) : false}
                                             />
                                         );
                                     })}
@@ -298,7 +365,7 @@ export function FileExplorer({
                                             className="flex items-center gap-4 px-4 py-3 rounded-lg cursor-pointer border border-dashed border-telegram-border text-telegram-subtext hover:text-telegram-text hover:bg-telegram-hover w-full"
                                         >
                                             <div className="w-5 h-5 flex items-center justify-center"><Plus className="w-4 h-4" /></div>
-                                            <span className="text-sm font-medium">Upload File...</span>
+                                            <span className="text-sm font-medium">Upload Files...</span>
                                         </button>
                                     </div>
                                 );
@@ -313,7 +380,8 @@ export function FileExplorer({
                                     <FileListItem
                                         file={file}
                                         selectedIds={selectedIds}
-                                        onFileClick={onFileClick}
+                                        onFileClick={handleFileClickWithOrder}
+                                        onFileDoubleClick={() => handleFileDoubleClickWithOrder(file)}
                                         handleContextMenu={handleContextMenu}
                                         onDragStart={onDragStart}
                                         onDragEnd={onDragEnd}
@@ -345,7 +413,7 @@ export function FileExplorer({
                     }}
                     onPreview={() => {
                         if (contextMenu.file.type === 'folder') {
-                            onFileClick({ preventDefault: () => { }, stopPropagation: () => { } } as React.MouseEvent, contextMenu.file.id);
+                            onFileClick({ preventDefault: () => { }, stopPropagation: () => { } } as React.MouseEvent, contextMenu.file.id, visibleOrderedIds);
                         } else {
                             handlePreviewRequest(contextMenu.file);
                         }

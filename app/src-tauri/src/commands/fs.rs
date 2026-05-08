@@ -6,6 +6,33 @@ use crate::TelegramState;
 use crate::models::{FolderMetadata, FileMetadata};
 use crate::bandwidth::BandwidthManager;
 use crate::commands::utils::{resolve_peer, map_error};
+use crate::commands::locks::LockState;
+
+fn ext_from_mime(mime: Option<&str>) -> Option<&'static str> {
+    Some(match mime? {
+        "video/mp4" => "mp4",
+        "video/quicktime" => "mov",
+        "video/x-matroska" => "mkv",
+        "video/webm" => "webm",
+        "video/x-msvideo" => "avi",
+        "audio/mpeg" => "mp3",
+        "audio/mp4" => "m4a",
+        "audio/ogg" => "ogg",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/flac" => "flac",
+        "audio/opus" => "opus",
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "application/pdf" => "pdf",
+        "application/zip" => "zip",
+        "application/x-tar" => "tar",
+        "application/gzip" | "application/x-gzip" => "gz",
+        "text/plain" => "txt",
+        _ => return None,
+    })
+}
 
 #[tauri::command]
 pub async fn cmd_create_folder(
@@ -74,21 +101,24 @@ pub async fn cmd_create_folder(
 #[tauri::command]
 pub async fn cmd_delete_folder(
     folder_id: i64,
+    app: tauri::AppHandle,
     state: State<'_, TelegramState>,
+    lock_state: State<'_, crate::commands::locks::LockState>,
 ) -> Result<bool, String> {
     let client_opt = {
         state.client.lock().await.clone()
     };
-    
+
     if client_opt.is_none() {
         log::info!("[MOCK] Deleted folder ID {}", folder_id);
+        crate::commands::locks::forget_folder_lock(&app, &lock_state, Some(folder_id)).await;
         return Ok(true);
     }
     let client = client_opt.unwrap();
     log::info!("Deleting folder/channel: {}", folder_id);
 
     let peer = resolve_peer(&client, Some(folder_id), &state.peer_cache).await?;
-    
+
     let input_channel = match peer {
         Peer::Channel(c) => {
              let chan = &c.raw;
@@ -99,11 +129,15 @@ pub async fn cmd_delete_folder(
         },
         _ => return Err("Only channels (folders) can be deleted.".to_string()),
     };
-    
+
     client.invoke(&tl::functions::channels::DeleteChannel {
         channel: input_channel,
     }).await.map_err(|e| format!("Failed to delete channel: {}", e))?;
-    
+
+    // Channel is gone — drop any stale password metadata so the sidebar's
+    // "X locked" indicator doesn't keep counting a folder that no longer exists.
+    crate::commands::locks::forget_folder_lock(&app, &lock_state, Some(folder_id)).await;
+
     Ok(true)
 }
 
@@ -295,9 +329,14 @@ pub async fn cmd_move_files(
 pub async fn cmd_get_files(
     folder_id: Option<i64>,
     state: State<'_, TelegramState>,
+    locks: State<'_, LockState>,
+    app: tauri::AppHandle,
 ) -> Result<Vec<FileMetadata>, String> {
+    if crate::commands::locks::cmd_is_folder_locked(folder_id, app, locks).await? {
+        return Err("LOCKED".into());
+    }
     let client_opt = { state.client.lock().await.clone() };
-    if client_opt.is_none() { 
+    if client_opt.is_none() {
         log::info!("[MOCK] Returning mock files for folder {:?}", folder_id);
         return Ok(Vec::new()); // No mock files for now
     }
@@ -311,14 +350,37 @@ pub async fn cmd_get_files(
         if let Some(doc) = msg.media() {
             let (name, size, mime, ext) = match doc {
                 Media::Document(d) => {
-                    let n = d.name().to_string();
+                    let raw_name = d.name().to_string();
                     let s = d.size();
                     let m = d.mime_type().map(|s| s.to_string());
-                    let e = std::path::Path::new(&n).extension().map(|os| os.to_str().unwrap_or("").to_string());
+                    let (n, e) = if raw_name.is_empty() {
+                        let ext = ext_from_mime(m.as_deref());
+                        let prefix = match m.as_deref() {
+                            Some(mt) if mt.starts_with("video/") => "Video",
+                            Some(mt) if mt.starts_with("audio/") => "Audio",
+                            Some(mt) if mt.starts_with("image/") => "Image",
+                            _ => "File",
+                        };
+                        let n = match ext {
+                            Some(ext) => format!("{}_{}.{}", prefix, msg.id(), ext),
+                            None => format!("{}_{}", prefix, msg.id()),
+                        };
+                        (n, ext.map(String::from))
+                    } else {
+                        let ext = std::path::Path::new(&raw_name)
+                            .extension()
+                            .and_then(|os| os.to_str())
+                            .map(|s| s.to_string());
+                        (raw_name, ext)
+                    };
                     (n, s, m, e)
                 },
-                Media::Photo(_) => ("Photo.jpg".to_string(), 0, Some("image/jpeg".into()), Some("jpg".into())),
-                _ => ("Unknown".to_string(), 0, None, None),
+                Media::Photo(p) => {
+                    let s = p.thumbs().iter().map(|ps| ps.size() as i64).max().unwrap_or(0);
+                    ("Photo.jpg".to_string(), s, Some("image/jpeg".into()), Some("jpg".into()))
+                },
+                // Skip stickers, contacts, polls, geo, dice, venues, geolive, webpage — not files
+                _ => continue,
             };
             files.push(FileMetadata {
                 id: msg.id() as i64, folder_id, name, size: size as u64, mime_type: mime, file_ext: ext, created_at: msg.date().to_string(), icon_type: "file".into()
@@ -358,55 +420,65 @@ pub async fn cmd_search_global(
         users_only: false,
     }).await.map_err(map_error)?;
 
-    if let tl::enums::messages::Messages::Messages(msgs) = result {
-        for msg in msgs.messages {
-            if let tl::enums::Message::Message(m) = msg {
-                if let Some(tl::enums::MessageMedia::Document(d)) = m.media {
-                    if let tl::enums::Document::Document(doc) = d.document.unwrap() {
-                        let name = doc.attributes.iter().find_map(|a| match a {
-                            tl::enums::DocumentAttribute::Filename(f) => Some(f.file_name.clone()),
-                            _ => None
-                        }).unwrap_or("Unknown".to_string());
-                        let size = doc.size as u64;
-                        let mime = doc.mime_type.clone();
-                        let ext = std::path::Path::new(&name).extension().map(|os| os.to_str().unwrap_or("").to_string());
-                        let folder_id = match m.peer_id {
-                            tl::enums::Peer::Channel(c) => Some(c.channel_id),
-                            tl::enums::Peer::User(u) => Some(u.user_id),
-                            tl::enums::Peer::Chat(c) => Some(c.chat_id),
-                        };
-                        files.push(FileMetadata {
-                            id: m.id as i64, folder_id, name, size,
-                            mime_type: Some(mime), file_ext: ext,
-                            created_at: m.date.to_string(), icon_type: "file".into()
-                        });
+    let (raw_messages, raw_chats) = match result {
+        tl::enums::messages::Messages::Messages(m) => (m.messages, m.chats),
+        tl::enums::messages::Messages::Slice(s) => (s.messages, s.chats),
+        _ => (Vec::new(), Vec::new()),
+    };
+
+    // Seed the peer cache from the chats list returned by SearchGlobal. Without
+    // this, opening a search-result file from a channel that does not surface
+    // in `iter_dialogs` (e.g. a [TD] folder that hasn't bubbled to the top
+    // recently, or a channel grammers' dialog iterator misses) hits
+    // resolve_peer's slow path and fails with "Folder/Chat NNN not found".
+    {
+        let mut cache = state.peer_cache.write().await;
+        let mut added = 0usize;
+        for chat in &raw_chats {
+            match chat {
+                tl::enums::Chat::Channel(c) => {
+                    let id = c.id;
+                    if !cache.contains_key(&id) {
+                        cache.insert(id, Peer::from_raw(chat.clone()));
+                        added += 1;
                     }
                 }
+                tl::enums::Chat::ChannelForbidden(c) => {
+                    let id = c.id;
+                    if !cache.contains_key(&id) {
+                        cache.insert(id, Peer::from_raw(chat.clone()));
+                        added += 1;
+                    }
+                }
+                _ => {} // Empty/Chat/Forbidden — basic-group chats, not used by [TD]
             }
         }
-    } else if let tl::enums::messages::Messages::Slice(msgs) = result {
-        for msg in msgs.messages {
-            if let tl::enums::Message::Message(m) = msg {
-                if let Some(tl::enums::MessageMedia::Document(d)) = m.media {
-                    if let tl::enums::Document::Document(doc) = d.document.unwrap() {
-                        let name = doc.attributes.iter().find_map(|a| match a {
-                            tl::enums::DocumentAttribute::Filename(f) => Some(f.file_name.clone()),
-                            _ => None
-                        }).unwrap_or("Unknown".to_string());
-                        let size = doc.size as u64;
-                        let mime = doc.mime_type.clone();
-                        let ext = std::path::Path::new(&name).extension().map(|os| os.to_str().unwrap_or("").to_string());
-                        let folder_id = match m.peer_id {
-                            tl::enums::Peer::Channel(c) => Some(c.channel_id),
-                            tl::enums::Peer::User(u) => Some(u.user_id),
-                            tl::enums::Peer::Chat(c) => Some(c.chat_id),
-                        };
-                        files.push(FileMetadata {
-                            id: m.id as i64, folder_id, name, size,
-                            mime_type: Some(mime), file_ext: ext,
-                            created_at: m.date.to_string(), icon_type: "file".into()
-                        });
-                    }
+        if added > 0 {
+            log::info!("[search] populated peer cache with {} channel(s) from search results", added);
+        }
+    }
+
+    for msg in raw_messages {
+        if let tl::enums::Message::Message(m) = msg {
+            if let Some(tl::enums::MessageMedia::Document(d)) = m.media {
+                if let tl::enums::Document::Document(doc) = d.document.unwrap() {
+                    let name = doc.attributes.iter().find_map(|a| match a {
+                        tl::enums::DocumentAttribute::Filename(f) => Some(f.file_name.clone()),
+                        _ => None
+                    }).unwrap_or("Unknown".to_string());
+                    let size = doc.size as u64;
+                    let mime = doc.mime_type.clone();
+                    let ext = std::path::Path::new(&name).extension().map(|os| os.to_str().unwrap_or("").to_string());
+                    let folder_id = match m.peer_id {
+                        tl::enums::Peer::Channel(c) => Some(c.channel_id),
+                        tl::enums::Peer::User(u) => Some(u.user_id),
+                        tl::enums::Peer::Chat(c) => Some(c.chat_id),
+                    };
+                    files.push(FileMetadata {
+                        id: m.id as i64, folder_id, name, size,
+                        mime_type: Some(mime), file_ext: ext,
+                        created_at: m.date.to_string(), icon_type: "file".into()
+                    });
                 }
             }
         }

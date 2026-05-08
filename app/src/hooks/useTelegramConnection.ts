@@ -12,6 +12,7 @@ export function useTelegramConnection(onLogoutParent: () => void) {
     const { confirm } = useConfirm();
 
     const [folders, setFolders] = useState<TelegramFolder[]>([]);
+    const [foldersLoaded, setFoldersLoaded] = useState(false);
     const [activeFolderId, setActiveFolderId] = useState<number | null>(null);
     const [store, setStore] = useState<Store | null>(null);
     const [isSyncing, setIsSyncing] = useState(false);
@@ -33,10 +34,14 @@ export function useTelegramConnection(onLogoutParent: () => void) {
 
                 const savedFolders = await _store.get<TelegramFolder[]>('folders');
                 if (savedFolders) setFolders(savedFolders);
+                // Signal that the initial load has completed even if there
+                // are no folders yet — downstream consumers (e.g. the lock-prune
+                // effect) need to distinguish "still loading" from "user has
+                // genuinely zero folders".
+                setFoldersLoaded(true);
 
 
-                const savedActiveFolderId = await _store.get<number | null>('activeFolderId');
-                if (savedActiveFolderId !== undefined) setActiveFolderId(savedActiveFolderId);
+                // Intentionally do not restore activeFolderId — app always starts with no folder open.
 
                 const apiIdStr = await _store.get<string>('api_id');
                 if (apiIdStr) {
@@ -144,8 +149,8 @@ export function useTelegramConnection(onLogoutParent: () => void) {
         }
     };
 
-    const handleCreateFolder = async (name: string) => {
-        if (!store) return;
+    const handleCreateFolder = async (name: string): Promise<TelegramFolder | null> => {
+        if (!store) return null;
         try {
             const newFolder = await invoke<TelegramFolder>('cmd_create_folder', { name });
             const updated = [...folders, newFolder];
@@ -153,10 +158,29 @@ export function useTelegramConnection(onLogoutParent: () => void) {
             await store.set('folders', updated);
             await store.save();
             toast.success(`Folder "${name}" created.`);
+            return newFolder;
         } catch (e) {
             toast.error("Failed to create folder: " + e);
             throw e;
         }
+    };
+
+    const handleReorderFolders = async (orderedIds: number[]) => {
+        if (!store) return;
+        const byId = new Map(folders.map(f => [f.id, f]));
+        const reordered: TelegramFolder[] = [];
+        for (const id of orderedIds) {
+            const f = byId.get(id);
+            if (f) reordered.push(f);
+        }
+        // Append any folder that wasn't in the orderedIds (defensive — should
+        // never happen, but ensures we don't drop entries on a stale order).
+        for (const f of folders) {
+            if (!orderedIds.includes(f.id)) reordered.push(f);
+        }
+        setFolders(reordered);
+        await store.set('folders', reordered);
+        await store.save();
     };
 
     const handleFolderDelete = async (folderId: number, folderName: string) => {
@@ -212,6 +236,7 @@ export function useTelegramConnection(onLogoutParent: () => void) {
     return {
         store,
         folders,
+        foldersLoaded,
         activeFolderId,
         setActiveFolderId: handleSetActiveFolderId,
         isSyncing,
@@ -220,6 +245,7 @@ export function useTelegramConnection(onLogoutParent: () => void) {
         handleSyncFolders,
         handleCreateFolder,
         handleFolderDelete,
+        handleReorderFolders,
         isNetworkError,
         forceLogout
     };

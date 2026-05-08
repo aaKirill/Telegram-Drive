@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { save, open } from '@tauri-apps/plugin-dialog';
+import { useAppSettings } from './useAppSettings';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { DownloadItem, TelegramFile } from '../types';
@@ -16,6 +17,7 @@ export function useFileDownload(store: Store | null) {
     const [processing, setProcessing] = useState(false);
     const [initialized, setInitialized] = useState(false);
     const cancelledRef = useRef<Set<string>>(new Set());
+    const { settings: appSettings } = useAppSettings();
 
     // Listen for progress events from Rust
     useEffect(() => {
@@ -64,7 +66,18 @@ export function useFileDownload(store: Store | null) {
         setDownloadQueue(q => q.map(i => i.id === item.id ? { ...i, status: 'downloading', progress: 0 } : i));
 
         try {
-            const savePath = await save({ defaultPath: item.filename });
+            // If the user set a default download folder, save straight there
+            // (with the file's own name) and skip the OS save dialog.
+            let savePath: string | null;
+            if (appSettings.downloadPath) {
+                const sep = appSettings.downloadPath.includes('\\') ? '\\' : '/';
+                const trimmed = appSettings.downloadPath.endsWith(sep)
+                    ? appSettings.downloadPath.slice(0, -1)
+                    : appSettings.downloadPath;
+                savePath = `${trimmed}${sep}${item.filename}`;
+            } else {
+                savePath = await save({ defaultPath: item.filename });
+            }
             if (!savePath) {
                 setDownloadQueue(q => q.filter(i => i.id !== item.id));
                 setProcessing(false);

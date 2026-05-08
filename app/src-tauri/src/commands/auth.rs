@@ -28,6 +28,19 @@ pub async fn ensure_client_initialized(
         return Ok(client.clone());
     }
 
+    // Defense in depth: if a passcode is configured but not yet unlocked,
+    // refuse to bring the client up. The frontend's normal flow shows the
+    // lock screen first, but any direct caller (e.g. a tauri command run
+    // before unlock) should hit a hard wall here.
+    let app_data_dir = app_handle.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let passcode_meta = app_data_dir.join("passcode.json");
+    if passcode_meta.exists()
+        && !state.passcode_unlocked.load(Ordering::SeqCst)
+    {
+        return Err("App is locked. Enter passcode to continue.".into());
+    }
+
     // CRITICAL: Shutdown existing runner before creating a new one
     // This prevents runner task accumulation which causes stack overflow
     let did_shutdown_old_runner = {
@@ -46,11 +59,7 @@ pub async fn ensure_client_initialized(
 
     let runner_num = state.runner_count.fetch_add(1, Ordering::SeqCst) + 1;
     log::info!("Initializing Telegram Client #{} with API ID: {}", runner_num, api_id);
-    
-    // Resolve session path safely
-    let app_data_dir = app_handle.path().app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-        
+
     if !app_data_dir.exists() {
         std::fs::create_dir_all(&app_data_dir)
             .map_err(|e| format!("Failed to create app data dir: {}", e))?;
@@ -60,18 +69,59 @@ pub async fn ensure_client_initialized(
     let session_path_str = session_path.to_string_lossy().to_string();
     log::info!("Opening session at: {}", session_path_str);
     
-    // Grammers initialization with corruption recovery
-    let session = match SqliteSession::open(&session_path_str).map_err(|e| e.to_string()) {
-        Ok(s) => s,
-        Err(_) => {
-            log::warn!("Session file corrupted or invalid. Recreating...");
-            let _ = std::fs::remove_file(&session_path);
-            let _ = std::fs::remove_file(format!("{}-wal", session_path_str));
-            let _ = std::fs::remove_file(format!("{}-shm", session_path_str));
-            
-            SqliteSession::open(&session_path_str)
-                .map_err(|e| format!("Failed to open session after recreation: {}", e))?
+    // Grammers initialization with conservative recovery.
+    //
+    // Old behaviour: any SqliteSession::open error deleted telegram.session
+    // (and -wal / -shm). That was reckless — transient errors like "database
+    // is locked" (common during a tauri-dev rebuild while the OS hasn't fully
+    // released the previous handle) would silently destroy a perfectly good
+    // session. The next start would mint a fresh auth key, which invalidates
+    // the old one server-side, leading to AUTH_KEY_UNREGISTERED.
+    //
+    // We now retry with backoff for likely-transient failures and only
+    // recreate when SQLite explicitly tells us the file is corrupt.
+    let session = {
+        const MAX_ATTEMPTS: u32 = 5;
+        let mut last_err = String::new();
+        let mut opened: Option<SqliteSession> = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match SqliteSession::open(&session_path_str) {
+                Ok(s) => { opened = Some(s); break; }
+                Err(e) => {
+                    let msg = e.to_string();
+                    last_err = msg.clone();
+                    let lower = msg.to_lowercase();
+                    let likely_transient = lower.contains("locked")
+                        || lower.contains("busy")
+                        || lower.contains("io error")
+                        || lower.contains("interrupted");
+                    let likely_corrupt = lower.contains("malformed")
+                        || lower.contains("not a database")
+                        || lower.contains("file is not a database")
+                        || lower.contains("disk image");
+                    if likely_transient && attempt < MAX_ATTEMPTS {
+                        log::warn!(
+                            "Session open transient error (attempt {}/{}): {}. Retrying...",
+                            attempt, MAX_ATTEMPTS, msg,
+                        );
+                        tokio::time::sleep(Duration::from_millis(150 * attempt as u64)).await;
+                        continue;
+                    }
+                    if likely_corrupt {
+                        log::error!("Session file is corrupted ({}); recreating", msg);
+                        let _ = std::fs::remove_file(&session_path);
+                        let _ = std::fs::remove_file(format!("{}-wal", session_path_str));
+                        let _ = std::fs::remove_file(format!("{}-shm", session_path_str));
+                        opened = Some(SqliteSession::open(&session_path_str)
+                            .map_err(|e| format!("Failed to open session after recreation: {}", e))?);
+                        break;
+                    }
+                    // Unknown error — surface it instead of nuking the session.
+                    return Err(format!("Failed to open session: {}", msg));
+                }
+            }
         }
+        opened.ok_or_else(|| format!("Failed to open session after retries: {}", last_err))?
     };
         
     let session = Arc::new(session);
@@ -126,10 +176,24 @@ pub async fn cmd_check_connection(
 
     if let Some(client) = client_msg_opt {
         // Ping (e.g., get_me)
-        if client.get_me().await.is_ok() {
-            return Ok(true);
+        match client.get_me().await {
+            Ok(_) => return Ok(true),
+            Err(e) => {
+                let msg = e.to_string();
+                // 401 means the session itself is no longer authorized — no
+                // amount of reconnection will help. Surface unauthenticated
+                // immediately so the UI can offer the auth wizard cleanly
+                // instead of spawning a doomed reconnect.
+                if msg.contains("AUTH_KEY_UNREGISTERED") || msg.contains("AUTH_KEY_INVALID")
+                    || msg.contains("USER_DEACTIVATED") || msg.contains("SESSION_REVOKED")
+                    || msg.contains(" 401 ") || msg.contains("(401)")
+                {
+                    log::warn!("Session is no longer authorized ({}); will need to re-login", msg);
+                    return Ok(false);
+                }
+                log::warn!("Connection check failed (get_me): {}. Attempting reconnect...", msg);
+            }
         }
-        log::warn!("Connection check failed (get_me). Attempting reconnect...");
     } else {
          log::warn!("Connection check: No client found. Checking for saved API ID...");
     }
@@ -142,12 +206,22 @@ pub async fn cmd_check_connection(
         
         match ensure_client_initialized(&app_handle, &state, api_id).await {
             Ok(c) => {
-                // Double check
-                if c.get_me().await.is_ok() {
-                    log::info!("Auto-reconnect successful.");
-                    return Ok(true);
-                } else {
-                    return Err("Reconnect succeeded but ping failed.".to_string());
+                match c.get_me().await {
+                    Ok(_) => {
+                        log::info!("Auto-reconnect successful.");
+                        return Ok(true);
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        log::warn!("Reconnect ping failed: {}", msg);
+                        if msg.contains("AUTH_KEY_UNREGISTERED") || msg.contains("AUTH_KEY_INVALID")
+                            || msg.contains("USER_DEACTIVATED") || msg.contains("SESSION_REVOKED")
+                            || msg.contains(" 401 ") || msg.contains("(401)")
+                        {
+                            return Ok(false);
+                        }
+                        return Err(format!("Reconnect succeeded but ping failed: {}", msg));
+                    }
                 }
             },
             Err(e) => return Err(format!("Auto-reconnect failed: {}", e))
@@ -187,12 +261,26 @@ pub async fn cmd_logout(
     *state.api_id.lock().await = None;
     crate::commands::utils::clear_peer_cache(&state.peer_cache).await;
 
-    // 4. Remove Session File
+    // 4. Remove Session File (both plaintext and any encrypted blob,
+    //    plus the passcode metadata — logout clears app-level passcode too,
+    //    since the new account will need its own).
     let app_data_dir = app_handle.path().app_data_dir().unwrap();
     let session_path = app_data_dir.join("telegram.session");
     let _ = std::fs::remove_file(session_path);
     let _ = std::fs::remove_file(app_data_dir.join("telegram.session-wal"));
     let _ = std::fs::remove_file(app_data_dir.join("telegram.session-shm"));
+    let _ = std::fs::remove_file(app_data_dir.join("telegram.session.enc"));
+    let _ = std::fs::remove_file(app_data_dir.join("passcode.json"));
+
+    // 5. Drop the cached passcode key + flip the in-memory unlock flag back
+    //    to false so a stray reconnect doesn't see a stale "unlocked" state.
+    if let Ok(mut k) = state.passcode_key.lock() {
+        if let Some(mut bytes) = k.take() {
+            use zeroize::Zeroize;
+            bytes.zeroize();
+        }
+    }
+    state.passcode_unlocked.store(false, Ordering::SeqCst);
 
     log::info!("Logout complete. Runner count: {}", state.runner_count.load(Ordering::SeqCst));
     Ok(true)
@@ -215,7 +303,20 @@ pub async fn cmd_auth_request_code(
     *state.api_id.lock().await = Some(api_id);
 
     let client_handle = ensure_client_initialized(&app_handle, &state, api_id).await?;
-    
+
+    // Defensive: if the loaded session is already signed in, don't burn an
+    // auth.sendCode call. Telegram applies a stiff per-phone FLOOD_WAIT
+    // (often 16h+) when sendCode is called too often, and there's no need
+    // to send a code when we already have a working session.
+    match client_handle.is_authorized().await {
+        Ok(true) => {
+            log::info!("Session for {} is already authorized — skipping sendCode", phone);
+            return Ok("already_authorized".to_string());
+        }
+        Ok(false) => {}
+        Err(e) => log::warn!("is_authorized check failed (will proceed with sendCode): {}", e),
+    }
+
     log::info!("Requesting code for {}", phone);
     
     let mut last_error = String::new();

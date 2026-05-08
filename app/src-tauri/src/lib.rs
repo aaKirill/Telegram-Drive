@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use commands::TelegramState;
 use commands::streaming::StreamConfig;
+use commands::locks::LockState;
 use rand::Rng;
 
 pub mod server;
-
+ 
 /// Single source of truth for the Actix streaming server port.
 /// Referenced in lib.rs (server startup) and exposed to the frontend
 /// via cmd_get_stream_info so no component ever hardcodes the port.
@@ -31,7 +32,9 @@ pub struct ActixServerHandle(pub Arc<std::sync::Mutex<Option<actix_web::dev::Ser
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,app_lib=info"),
+    ).init();
 
     let stream_token = generate_stream_token();
 
@@ -58,10 +61,13 @@ pub fn run() {
                 runner_shutdown: Arc::new(std::sync::Mutex::new(None)),
                 runner_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 peer_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+                passcode_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                passcode_key: Arc::new(std::sync::Mutex::new(None)),
             });
             app.manage(bandwidth::BandwidthManager::new(app.handle()));
             app.manage(StreamConfig { token: stream_token.clone(), port: STREAM_PORT });
             app.manage(ActixServerHandle(server_handle_for_setup.clone()));
+            app.manage(LockState::new());
             
             // Start Streaming Server on dedicated thread (Actix needs its own runtime)
             let state = Arc::new(app.state::<TelegramState>().inner().clone());
@@ -99,6 +105,7 @@ pub fn run() {
             commands::cmd_delete_folder,
             commands::cmd_get_bandwidth,
             commands::cmd_get_preview,
+            commands::cmd_open_path,
             commands::cmd_logout,
             commands::cmd_scan_folders,
             commands::cmd_search_global,
@@ -107,6 +114,23 @@ pub fn run() {
             commands::cmd_clean_cache,
             commands::cmd_get_thumbnail,
             commands::cmd_get_stream_info,
+            commands::cmd_lock_folder,
+            commands::cmd_unlock_folder,
+            commands::cmd_remove_lock,
+            commands::cmd_list_locked_keys,
+            commands::cmd_list_all_locked_keys,
+            commands::cmd_is_folder_locked,
+            commands::cmd_relock_folder,
+            commands::cmd_prune_orphan_locks,
+            commands::cmd_get_lock_attempts,
+            commands::cmd_get_passcode_attempts,
+            commands::cmd_passcode_status,
+            commands::cmd_passcode_set,
+            commands::cmd_passcode_unlock,
+            commands::cmd_passcode_lock,
+            commands::cmd_passcode_change,
+            commands::cmd_passcode_remove,
+            commands::cmd_passcode_reset,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -131,6 +155,25 @@ pub fn run() {
                 // stop() sends the signal synchronously; the returned future
                 // tracks drain completion — we don't need to await it on exit.
                 drop(handle.stop(true));
+            }
+
+            // 3. If the user has a local passcode set, encrypt the live
+            //    plaintext session file with their cached key and wipe the
+            //    plaintext. Without this, an ungraceful shutdown leaves the
+            //    decrypted SQLite session readable on disk between runs.
+            let state = app_handle.state::<TelegramState>();
+            if state.passcode_unlocked.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Ok(guard) = state.passcode_key.lock() {
+                    if let Some(key) = guard.as_ref() {
+                        if let Ok(app_data_dir) = app_handle.path().app_data_dir() {
+                            if let Err(e) = commands::passcode::seal_session_with_key(&app_data_dir, key) {
+                                log::error!("Failed to seal session on exit: {}", e);
+                            } else {
+                                log::info!("Session sealed for shutdown.");
+                            }
+                        }
+                    }
+                }
             }
         }
     });

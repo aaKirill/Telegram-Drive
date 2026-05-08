@@ -1,8 +1,24 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X, ChevronLeft, ChevronRight } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { TelegramFile } from '../../types';
 import { isVideoFile, isAudioFile } from '../../utils';
+
+const VOLUME_KEY = 'mediaPlayerVolume';
+const MUTED_KEY = 'mediaPlayerMuted';
+
+function applyStoredVolume(el: HTMLMediaElement) {
+    const v = parseFloat(localStorage.getItem(VOLUME_KEY) ?? '');
+    if (!Number.isNaN(v) && v >= 0 && v <= 1) el.volume = v;
+    el.muted = localStorage.getItem(MUTED_KEY) === 'true';
+}
+
+function persistVolumeHandler(el: HTMLMediaElement) {
+    return () => {
+        localStorage.setItem(VOLUME_KEY, String(el.volume));
+        localStorage.setItem(MUTED_KEY, String(el.muted));
+    };
+}
 
 interface MediaPlayerProps {
     file: TelegramFile;
@@ -15,19 +31,47 @@ interface MediaPlayerProps {
 }
 
 export function MediaPlayer({ file, onClose, onNext, onPrev, currentIndex, totalItems, activeFolderId }: MediaPlayerProps) {
-    const [streamToken, setStreamToken] = useState<string | null>(null);
+    const [streamInfo, setStreamInfo] = useState<{ token: string; base_url: string } | null>(null);
+    const [poster, setPoster] = useState<string | null>(null);
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const audioRef = useRef<HTMLAudioElement>(null);
 
     useEffect(() => {
-        invoke<string>('cmd_get_stream_token').then(setStreamToken).catch(() => {});
+        invoke<{ token: string; base_url: string }>('cmd_get_stream_info').then(setStreamInfo).catch(() => {});
     }, []);
 
-    const folderIdParam = activeFolderId !== null ? activeFolderId.toString() : 'home';
-    const streamUrl = streamToken
-        ? `http://localhost:14200/stream/${folderIdParam}/${file.id}?token=${streamToken}`
+    // Files served by global search may live in a different channel than the
+    // currently-active folder; honour the file's own folder_id when present.
+    const fileFolderId: number | null =
+        file.folder_id !== undefined && file.folder_id !== null ? file.folder_id : activeFolderId;
+    const folderIdParam = fileFolderId !== null ? fileFolderId.toString() : 'home';
+    const streamUrl = streamInfo
+        ? `${streamInfo.base_url}/stream/${folderIdParam}/${file.id}?token=${streamInfo.token}`
         : null;
 
     const isVideo = isVideoFile(file.name);
     const isAudio = isAudioFile(file.name);
+
+    useEffect(() => {
+        if (!isVideo) {
+            setPoster(null);
+            return;
+        }
+        let cancelled = false;
+        invoke<string>('cmd_get_thumbnail', { messageId: file.id, folderId: fileFolderId })
+            .then((res) => { if (!cancelled && res) setPoster(res); })
+            .catch(() => {});
+        return () => { cancelled = true; };
+    }, [file.id, fileFolderId, isVideo]);
+
+    useEffect(() => {
+        const el = videoRef.current ?? audioRef.current;
+        if (!el) return;
+        applyStoredVolume(el);
+        const handler = persistVolumeHandler(el);
+        el.addEventListener('volumechange', handler);
+        return () => el.removeEventListener('volumechange', handler);
+    }, [streamUrl, isVideo, isAudio]);
 
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -94,7 +138,9 @@ export function MediaPlayer({ file, onClose, onNext, onPrev, currentIndex, total
                         </div>
                     ) : isVideo ? (
                         <video
+                            ref={videoRef}
                             src={streamUrl}
+                            poster={poster ?? undefined}
                             controls
                             autoPlay
                             className="w-full h-full object-contain"
@@ -104,7 +150,7 @@ export function MediaPlayer({ file, onClose, onNext, onPrev, currentIndex, total
                             <div className="w-32 h-32 rounded-full bg-telegram-surface flex items-center justify-center mb-8 shadow-xl animate-pulse-slow">
                                 <svg xmlns="http://www.w3.org/2000/svg" className="w-12 h-12 text-telegram-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
                             </div>
-                            <audio src={streamUrl} controls autoPlay className="w-full max-w-md" />
+                            <audio ref={audioRef} src={streamUrl} controls autoPlay className="w-full max-w-md" />
                         </div>
                     ) : (
                         <div className="text-white">Unsupported media type</div>

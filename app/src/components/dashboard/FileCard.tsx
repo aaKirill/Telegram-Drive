@@ -12,7 +12,9 @@ interface FileCardProps {
     onPreview?: () => void;
     isSelected: boolean;
     onClick?: (e: React.MouseEvent) => void;
+    onDoubleClick?: () => void;
     onContextMenu?: (e: React.MouseEvent) => void;
+    disableThumbnail?: boolean;
     onDrop?: (e: React.DragEvent, folderId: number) => void;
     onDragStart?: (fileId: number) => void;
     onDragEnd?: () => void;
@@ -21,13 +23,13 @@ interface FileCardProps {
     onToggleSelection?: () => void;
 }
 
-// Check if file is an image type that can have a thumbnail
-function isImageFile(filename: string): boolean {
+// Check if file has a thumbnail available (images + videos with poster frames)
+function hasThumbnail(filename: string): boolean {
     const ext = filename.split('.').pop()?.toLowerCase() || '';
-    return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext);
+    return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'mp4', 'mov', 'mkv', 'webm', 'avi'].includes(ext);
 }
 
-export function FileCard({ file, onDelete, onDownload, onPreview, isSelected, onClick, onContextMenu, onDrop, onDragStart, onDragEnd, activeFolderId, height, onToggleSelection }: FileCardProps) {
+export function FileCard({ file, onDelete, onDownload, onPreview, isSelected, onClick, onDoubleClick, onContextMenu, onDrop, onDragStart, onDragEnd, activeFolderId, height, onToggleSelection, disableThumbnail }: FileCardProps) {
     const isFolder = file.type === 'folder';
     const [isDragOver, setIsDragOver] = useState(false);
     const [thumbnail, setThumbnail] = useState<string | null>(null);
@@ -35,14 +37,24 @@ export function FileCard({ file, onDelete, onDownload, onPreview, isSelected, on
 
     // Lazy load thumbnail for image files
     useEffect(() => {
-        if (isFolder || !isImageFile(file.name)) return;
+        if (isFolder || !hasThumbnail(file.name) || disableThumbnail) {
+            // If a thumbnail had been loaded for a previous render, drop it
+            // so flipping the global "Hide thumbnails" setting takes effect
+            // immediately instead of waiting for the next mount.
+            if (disableThumbnail && thumbnail) setThumbnail(null);
+            return;
+        }
 
         let cancelled = false;
         setThumbnailLoading(true);
 
+        const thumbFolderId =
+            file.folder_id !== undefined && file.folder_id !== null
+                ? file.folder_id
+                : (activeFolderId ?? null);
         invoke<string>('cmd_get_thumbnail', {
             messageId: file.id,
-            folderId: activeFolderId
+            folderId: thumbFolderId
         }).then((result) => {
             if (!cancelled && result) {
                 setThumbnail(result);
@@ -54,13 +66,21 @@ export function FileCard({ file, onDelete, onDownload, onPreview, isSelected, on
         });
 
         return () => { cancelled = true; };
-    }, [file.id, file.name, activeFolderId, isFolder]);
+    }, [file.id, file.name, activeFolderId, isFolder, disableThumbnail]);
 
     return (
         <div
-            className="relative"
+            className="relative select-none"
             onContextMenu={onContextMenu}
             onClick={onClick}
+            onDoubleClick={onDoubleClick}
+            onMouseDown={(e) => {
+                // Block the browser's default shift-click "extend text selection"
+                // behaviour. Without this, the user gets the highlighted text
+                // strip across cards AND the native selection can intercept the
+                // click event in a way that breaks shift-range selection.
+                if (e.shiftKey) e.preventDefault();
+            }}
             onDragOver={(e) => {
                 if (isFolder) {
                     e.preventDefault();
@@ -85,17 +105,24 @@ export function FileCard({ file, onDelete, onDownload, onPreview, isSelected, on
             }}
         >
             <motion.div
-                layout
                 draggable={!isFolder}
                 onDragStart={(e: any) => {
                     if (onDragStart) onDragStart(file.id);
                     e.dataTransfer.setData("application/x-telegram-file-id", file.id.toString());
                     e.dataTransfer.effectAllowed = 'move';
+                    // Explicit drag image keeps the title overlay attached to
+                    // the right card. Without this, framer-motion's hover
+                    // transform (y: -4) and the absolute-positioned title
+                    // overlay can desync — the browser snapshots the card body
+                    // at the row position but the title overlay paints at the
+                    // first-row position, so dragging row 5 looks like row 1's
+                    // title is being dragged.
+                    const target = e.currentTarget as HTMLElement;
+                    e.dataTransfer.setDragImage(target, target.clientWidth / 2, target.clientHeight / 2);
                 }}
                 onDragEnd={() => {
                     if (onDragEnd) onDragEnd();
                 }}
-                whileHover={{ y: -4 }}
                 className={`group cursor-pointer bg-telegram-surface rounded-xl overflow-hidden border hover:shadow-[0_4px_20px_rgba(0,0,0,0.2)] transition-all relative
                 ${isSelected ? 'border-telegram-primary bg-telegram-primary/5 ring-1 ring-telegram-primary' : 'border-telegram-border hover:border-telegram-primary/50'}
                 ${isDragOver ? 'ring-2 ring-telegram-primary bg-telegram-primary/20 scale-105' : ''}`}
@@ -116,7 +143,7 @@ export function FileCard({ file, onDelete, onDownload, onPreview, isSelected, on
                     <div className="absolute inset-0 flex items-center justify-center p-4">
                         {isFolder ? (
                             <Folder className="w-12 h-12 text-telegram-primary" />
-                        ) : thumbnailLoading && isImageFile(file.name) ? (
+                        ) : thumbnailLoading && hasThumbnail(file.name) ? (
                             <div className="w-8 h-8 border-2 border-telegram-primary/30 border-t-telegram-primary rounded-full animate-spin" />
                         ) : (
                             <FileTypeIcon filename={file.name} size="lg" />
