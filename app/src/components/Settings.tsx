@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { open } from '@tauri-apps/plugin-dialog';
 import { toast } from 'sonner';
-import { ArrowLeft, FolderOpen, KeyRound, Lock, Unlock, ShieldOff, Trash2, Eye, EyeOff } from 'lucide-react';
+import { ArrowLeft, FolderOpen, KeyRound, Lock, Unlock, ShieldOff, Trash2, Eye, EyeOff, RefreshCw } from 'lucide-react';
 import { useAppSettings, AppSettings } from '../hooks/useAppSettings';
 import { useFolderPrefs } from '../hooks/useFolderPrefs';
 import { useFolderLocks, folderKey } from '../hooks/useFolderLocks';
 import { useFolderKillswitch } from '../hooks/useFolderKillswitch';
+import { useUpdateCheck } from '../hooks/useUpdateCheck';
 import { TelegramFolder, BandwidthStats } from '../types';
 import { useConfirm } from '../context/ConfirmContext';
 import { formatBytes } from '../utils';
@@ -105,6 +107,8 @@ export function Settings({ onClose, folders, bandwidth, locks }: SettingsProps) 
     const [removePass, setRemovePass] = useState('');
     const [pendingLock, setPendingLock] = useState<PendingLockAction | null>(null);
     const killswitch = useFolderKillswitch();
+    const updater = useUpdateCheck();
+    const [appVersion, setAppVersion] = useState<string>('');
 
     const folderHasPassword = (folderId: number) => locks.allLockedKeys.has(folderKey(folderId));
 
@@ -131,6 +135,7 @@ export function Settings({ onClose, folders, bandwidth, locks }: SettingsProps) 
 
     useEffect(() => {
         invoke<PasscodeStatus>('cmd_passcode_status').then(setPassStatus).catch(() => {});
+        getVersion().then(setAppVersion).catch(() => {});
     }, []);
 
     const set = <K extends keyof AppSettings>(key: K) => (v: AppSettings[K]) => update(key, v);
@@ -386,6 +391,28 @@ export function Settings({ onClose, folders, bandwidth, locks }: SettingsProps) 
                     <Row label="Check for updates on startup" hint="Polls the GitHub releases endpoint 5 seconds after launch.">
                         <Toggle checked={settings.updateCheckEnabled} onChange={set('updateCheckEnabled')} />
                     </Row>
+                    <Row
+                        label="Check now"
+                        hint={
+                            updater.error
+                                ? `Last check failed: ${updater.error}`
+                                : updater.available
+                                    ? `Update available: v${updater.version}`
+                                    : updater.notFound
+                                        ? `You're up to date${appVersion ? ` (v${appVersion})` : ''}.`
+                                        : 'Manually query GitHub for a newer release.'
+                        }
+                    >
+                        <button
+                            type="button"
+                            onClick={() => updater.checkForUpdates()}
+                            disabled={updater.checking || updater.downloading}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded bg-telegram-hover hover:bg-telegram-border border border-telegram-border text-telegram-text disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            <RefreshCw className={`w-3.5 h-3.5 ${updater.checking ? 'animate-spin' : ''}`} />
+                            {updater.checking ? 'Checking…' : 'Check for updates'}
+                        </button>
+                    </Row>
                 </Section>
 
                 <Section
@@ -413,6 +440,10 @@ export function Settings({ onClose, folders, bandwidth, locks }: SettingsProps) 
                         </button>
                     </Row>
                 </Section>
+
+                <div className="text-center text-xs text-telegram-subtext py-4">
+                    Telegram Drive{appVersion ? ` v${appVersion}` : ''}
+                </div>
             </div>
 
             {pendingLock && (

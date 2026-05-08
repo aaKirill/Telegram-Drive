@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useReducer } from 'react';
 import { check, Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { useAppSettings } from './useAppSettings';
@@ -10,95 +10,112 @@ interface UpdateState {
     progress: number;
     error: string | null;
     version: string | null;
+    lastCheckedAt: number | null;
+    notFound: boolean;
+}
+
+// Module-level shared state. Same pattern as useAppSettings/useFolderPrefs:
+// the manual "Check for updates" button in Settings has to drive the same
+// banner that App renders, but each useState() callsite owns its own copy
+// of state — so a per-instance hook would split the two consumers.
+let _state: UpdateState = {
+    checking: false,
+    available: false,
+    downloading: false,
+    progress: 0,
+    error: null,
+    version: null,
+    lastCheckedAt: null,
+    notFound: false,
+};
+let _update: Update | null = null;
+const subscribers = new Set<() => void>();
+const setState = (patch: Partial<UpdateState>) => {
+    _state = { ..._state, ...patch };
+    subscribers.forEach(fn => fn());
+};
+
+export async function checkForUpdates(): Promise<void> {
+    setState({ checking: true, error: null, notFound: false });
+    try {
+        const updateInfo = await check();
+        if (updateInfo) {
+            _update = updateInfo;
+            setState({ checking: false, available: true, version: updateInfo.version, lastCheckedAt: Date.now() });
+        } else {
+            _update = null;
+            setState({ checking: false, available: false, version: null, notFound: true, lastCheckedAt: Date.now() });
+        }
+    } catch (err: unknown) {
+        setState({ checking: false, error: stringifyErr(err), lastCheckedAt: Date.now() });
+    }
+}
+
+function stringifyErr(err: unknown): string {
+    if (err instanceof Error) return err.message;
+    if (typeof err === 'string') return err;
+    if (err && typeof err === 'object') {
+        const anyErr = err as { message?: unknown };
+        if (typeof anyErr.message === 'string') return anyErr.message;
+        try { return JSON.stringify(err); } catch { /* fall through */ }
+    }
+    return 'Failed to check for updates';
+}
+
+export async function downloadAndInstall(): Promise<void> {
+    if (!_update) return;
+    setState({ downloading: true, progress: 0 });
+    let downloaded = 0;
+    let contentLength = 0;
+    try {
+        await _update.downloadAndInstall((event) => {
+            if (event.event === 'Started') {
+                const data = event.data as { contentLength?: number };
+                contentLength = data.contentLength || 0;
+            } else if (event.event === 'Progress') {
+                const data = event.data as { chunkLength?: number };
+                downloaded += data.chunkLength || 0;
+                if (contentLength > 0) {
+                    const pct = Math.round((downloaded / contentLength) * 100);
+                    setState({ progress: Math.min(pct, 100) });
+                }
+            }
+        });
+        await relaunch();
+    } catch (err: unknown) {
+        setState({ downloading: false, error: stringifyErr(err) });
+    }
+}
+
+export function dismissUpdate(): void {
+    _update = null;
+    setState({ available: false });
 }
 
 export function useUpdateCheck() {
-    const [state, setState] = useState<UpdateState>({
-        checking: false,
-        available: false,
-        downloading: false,
-        progress: 0,
-        error: null,
-        version: null,
-    });
-    const [update, setUpdate] = useState<Update | null>(null);
+    const [, force] = useReducer((n: number) => n + 1, 0);
     const { settings, loaded: settingsLoaded } = useAppSettings();
 
-    const checkForUpdates = useCallback(async () => {
-        setState(s => ({ ...s, checking: true, error: null }));
-        try {
-            const updateInfo = await check();
-            if (updateInfo) {
-                setUpdate(updateInfo);
-                setState(s => ({
-                    ...s,
-                    checking: false,
-                    available: true,
-                    version: updateInfo.version,
-                }));
-            } else {
-                setState(s => ({ ...s, checking: false, available: false }));
-            }
-        } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : 'Failed to check for updates';
-            setState(s => ({
-                ...s,
-                checking: false,
-                error: message,
-            }));
-        }
-    }, []);
-
-    const downloadAndInstall = useCallback(async () => {
-        if (!update) return;
-
-        setState(s => ({ ...s, downloading: true, progress: 0 }));
-        let downloaded = 0;
-        let contentLength = 0;
-
-        try {
-            await update.downloadAndInstall((event) => {
-                if (event.event === 'Started') {
-                    const data = event.data as { contentLength?: number };
-                    contentLength = data.contentLength || 0;
-                } else if (event.event === 'Progress') {
-                    const data = event.data as { chunkLength?: number };
-                    downloaded += data.chunkLength || 0;
-                    if (contentLength > 0) {
-                        const pct = Math.round((downloaded / contentLength) * 100);
-                        setState(s => ({ ...s, progress: Math.min(pct, 100) }));
-                    }
-                }
-            });
-
-            await relaunch();
-        } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : 'Failed to install update';
-            setState(s => ({
-                ...s,
-                downloading: false,
-                error: message,
-            }));
-        }
-    }, [update]);
-
-    const dismissUpdate = useCallback(() => {
-        setState(s => ({ ...s, available: false }));
-        setUpdate(null);
+    useEffect(() => {
+        subscribers.add(force);
+        return () => { subscribers.delete(force); };
     }, []);
 
     useEffect(() => {
         if (!settingsLoaded || !settings.updateCheckEnabled) return;
-        const timer = setTimeout(() => {
-            checkForUpdates();
-        }, 5000);
+        if (_state.lastCheckedAt !== null) return;
+        const timer = setTimeout(() => { checkForUpdates(); }, 5000);
         return () => clearTimeout(timer);
-    }, [checkForUpdates, settingsLoaded, settings.updateCheckEnabled]);
+    }, [settingsLoaded, settings.updateCheckEnabled]);
+
+    const stable = useCallback(checkForUpdates, []);
+    const stableInstall = useCallback(downloadAndInstall, []);
+    const stableDismiss = useCallback(dismissUpdate, []);
 
     return {
-        ...state,
-        checkForUpdates,
-        downloadAndInstall,
-        dismissUpdate,
+        ..._state,
+        checkForUpdates: stable,
+        downloadAndInstall: stableInstall,
+        dismissUpdate: stableDismiss,
     };
 }
