@@ -47,6 +47,39 @@ Telegram Drive leverages the Telegram API to allow you to upload, organize, and 
 |-----------------|------------------|
 | ![Folder Creation](screenshots/FolderCreation.png) | ![Folder List View](screenshots/FolderListView.png) |
 
+##  Installing from Releases
+
+Pre-built installers for each platform are published on the [Releases page](https://github.com/aaKirill/Telegram-Drive/releases). Pick the right one for your machine:
+
+| Platform | File |
+|----------|------|
+| macOS (Apple Silicon — M1/M2/M3/M4) | `Telegram.Drive_<version>_aarch64.dmg` |
+| macOS (Intel) | `Telegram.Drive_<version>_x64.dmg` |
+| Windows | `Telegram.Drive_<version>_x64-setup.exe` (or `.msi`) |
+| Linux (Debian/Ubuntu) | `Telegram.Drive_<version>_amd64.deb` |
+| Linux (Fedora/RHEL) | `Telegram.Drive-<version>-1.x86_64.rpm` |
+| Linux (universal) | `Telegram.Drive_<version>_amd64.AppImage` |
+
+The `.app.tar.gz` files are for the in-app auto-updater — don't install those manually.
+
+### Bypassing the OS warning on first launch
+
+The releases are signed for the auto-updater but not with an Apple Developer ID or a Windows code-signing certificate, so your OS will warn you on the very first launch. This is a one-time step per install — auto-updates afterward apply silently without re-prompting.
+
+**macOS — "Telegram Drive.app is damaged and can't be opened"**
+
+Open Terminal and run:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Telegram Drive.app"
+```
+
+Then launch the app normally.
+
+**Windows — "Windows protected your PC" (SmartScreen)**
+
+Click **More info** under the warning, then click the **Run anyway** button that appears.
+
 ##  Tech Stack
 
 *   **Frontend**: React, TypeScript, TailwindCSS, Framer Motion
