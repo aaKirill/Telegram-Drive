@@ -65,7 +65,11 @@ const HANDLERS: Record<string, Handler> = {
   cmd_get_bandwidth: () => ({ uploaded: 0, downloaded: 0 }),
 
   cmd_upload_file: (a) =>
-    files.uploadFile(String(a?.path ?? ""), Number(a?.folderId), String(a?.transferId ?? "")) as Promise<unknown>,
+    files.uploadFile(
+      String(a?.path ?? ""),
+      a?.folderId == null ? null : Number(a.folderId),
+      String(a?.transferId ?? ""),
+    ) as Promise<unknown>,
   cmd_download_file: (a) =>
     files.downloadFile(
       Number(a?.messageId),

@@ -75,7 +75,7 @@ function takeRegisteredFile(token: string): File | undefined {
 
 export async function uploadFile(
   pathOrToken: string,
-  folderId: number,
+  folderId: number | null,
   transferId: string,
 ): Promise<UploadResult> {
   const file = takeRegisteredFile(pathOrToken);
@@ -84,7 +84,8 @@ export async function uploadFile(
   }
   clearCancellation(transferId);
   const c = await ensureClient();
-  const entity = await c.getInputEntity(bigInt(folderId));
+  // null = Saved Messages, gramjs's "me" sentinel resolves to self.
+  const entity = folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
   try {
     const sent = await c.sendFile(entity, {
       file,
@@ -143,11 +144,10 @@ export async function downloadFile(
   folderId: number | null,
   transferId: string,
 ): Promise<void> {
-  if (folderId == null) throw new Error("download requires folderId");
   clearCancellation(transferId);
   await readSem.run(async () => {
     const c = await ensureClient();
-    const entity = await c.getInputEntity(bigInt(folderId));
+    const entity = folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
     const messages = await c.getMessages(entity, { ids: [messageId] });
     const msg = messages[0];
     if (!msg || !msg.media) throw new Error("Message has no media");
@@ -253,25 +253,23 @@ export function clearAllBlobs(): void {
 }
 
 export async function getThumbnail(messageId: number, folderId: number | null): Promise<string> {
-  if (folderId == null) return "";
-  const key = `t:${folderId}:${messageId}`;
+  const key = `t:${folderId ?? "home"}:${messageId}`;
   return thumbLRU.get(key, () => fetchThumbBlob(messageId, folderId, "thumbnail"));
 }
 
 export async function getPreview(messageId: number, folderId: number | null): Promise<string> {
-  if (folderId == null) return "";
-  const key = `p:${folderId}:${messageId}`;
+  const key = `p:${folderId ?? "home"}:${messageId}`;
   return thumbLRU.get(key, () => fetchThumbBlob(messageId, folderId, "preview"));
 }
 
 async function fetchThumbBlob(
   messageId: number,
-  folderId: number,
+  folderId: number | null,
   kind: "thumbnail" | "preview",
 ): Promise<string> {
   return readSem.run(async () => {
     const c = await ensureClient();
-    const entity = await c.getInputEntity(bigInt(folderId));
+    const entity = folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
     const messages = await c.getMessages(entity, { ids: [messageId] });
     const msg = messages[0];
     if (!msg || !msg.media) return "";
@@ -295,11 +293,10 @@ async function fetchThumbBlob(
 // --- Full media (video / PDF / audio) -----------------------------------
 
 export async function getMediaUrl(messageId: number, folderId: number | null): Promise<string> {
-  if (folderId == null) throw new Error("getMediaUrl requires folderId");
-  const key = `${folderId}:${messageId}`;
+  const key = `${folderId ?? "home"}:${messageId}`;
   return mediaLRU.get(key, () => readSem.run(async () => {
     const c = await ensureClient();
-    const entity = await c.getInputEntity(bigInt(folderId));
+    const entity = folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
     const messages = await c.getMessages(entity, { ids: [messageId] });
     const msg = messages[0];
     if (!msg || !msg.media) throw new Error("Message has no media");

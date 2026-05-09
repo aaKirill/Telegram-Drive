@@ -157,7 +157,11 @@ export async function getFiles(folderId: number | null): Promise<FileMetadata[]>
   const target: "me" | Awaited<ReturnType<typeof c.getInputEntity>> =
     folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
   const out: FileMetadata[] = [];
-  for await (const msg of c.iterMessages(target, { limit: 500 })) {
+  // No limit — walks until the iterator exhausts. Tauri's cmd_get_files
+  // does the same (unbounded iter_messages). The earlier 500 cap meant
+  // a Saved Messages with thousands of items would surface only the
+  // most recent slice. Slow for huge chats but complete.
+  for await (const msg of c.iterMessages(target)) {
     const m = mapMessageToFile(msg, folderId);
     if (m) out.push(m);
   }
@@ -166,7 +170,10 @@ export async function getFiles(folderId: number | null): Promise<FileMetadata[]>
 
 export async function deleteFile(messageId: number, folderId: number | null): Promise<boolean> {
   const c = await ensureClient();
-  const entity = folderId != null ? await c.getInputEntity(bigInt(folderId)) : undefined;
+  // For Saved Messages (folderId null), pass "me" so gramjs resolves to
+  // the self peer. Passing undefined here makes deleteMessages do a
+  // global "find this message anywhere" which is wrong.
+  const entity = folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
   await c.deleteMessages(entity, [messageId], { revoke: true });
   return true;
 }
@@ -177,12 +184,11 @@ export async function moveFiles(
   targetFolderId: number | null,
 ): Promise<FileMetadata[]> {
   if (sourceFolderId === targetFolderId) return [];
-  if (sourceFolderId == null || targetFolderId == null) {
-    throw new Error("Move requires both source and target folders");
-  }
   const c = await ensureClient();
-  const src = await c.getInputEntity(bigInt(sourceFolderId));
-  const dst = await c.getInputEntity(bigInt(targetFolderId));
+  // null folderId == Saved Messages — gramjs resolves "me" to the self
+  // peer, same shape forwardMessages / deleteMessages accept.
+  const src = sourceFolderId == null ? "me" : await c.getInputEntity(bigInt(sourceFolderId));
+  const dst = targetFolderId == null ? "me" : await c.getInputEntity(bigInt(targetFolderId));
   // forwardMessages returns the freshly-created Message objects in the
   // destination peer. We map them to FileMetadata so the frontend can
   // optimistic-insert into the target folder cache without waiting on
