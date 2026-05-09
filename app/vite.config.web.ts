@@ -20,7 +20,7 @@ export default defineConfig({
     // gramjs (the `telegram` package) imports Node's Buffer/process/crypto
     // throughout. The plugin shims them so the bundle runs in browsers.
     nodePolyfills({
-      include: ["buffer", "process", "util", "events", "stream", "crypto", "path"],
+      include: ["buffer", "process", "util", "events", "stream", "crypto", "path", "os"],
       globals: { Buffer: true, process: true, global: true },
     }),
     {
