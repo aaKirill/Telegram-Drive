@@ -22,6 +22,16 @@ export function useFolderLocks() {
 
     useEffect(() => { refresh(); }, [refresh]);
 
+    // When a sync snapshot is applied (potentially bringing in folder
+    // lock verifiers from another device), re-read so the sidebar's
+    // lock badges reflect the new state immediately. Otherwise the hook
+    // would keep its mount-time snapshot until next reload.
+    useEffect(() => {
+        const onSyncApplied = () => { refresh(); };
+        window.addEventListener("td:sync-applied", onSyncApplied);
+        return () => window.removeEventListener("td:sync-applied", onSyncApplied);
+    }, [refresh]);
+
     const isLocked = useCallback((folderId: number | null) => lockedKeys.has(folderKey(folderId)), [lockedKeys]);
     const hasPassword = useCallback((folderId: number | null) => allLockedKeys.has(folderKey(folderId)), [allLockedKeys]);
 

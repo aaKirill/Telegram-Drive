@@ -9,6 +9,7 @@
 import { Api, utils } from "telegram";
 import bigInt from "big-integer";
 import { ensureClient } from "./client";
+import * as locks from "./locks";
 
 type TelegramFolder = { id: number; name: string; parent_id: number | null };
 type FileMetadata = {
@@ -141,11 +142,22 @@ export async function deleteFolder(folderId: number): Promise<boolean> {
 }
 
 export async function getFiles(folderId: number | null): Promise<FileMetadata[]> {
-  if (folderId == null) return [];
+  // Lock gate: a folder with a password set must be in the in-memory
+  // unlockedFolders set before getFiles will read it. Mirrors Tauri's
+  // cmd_get_files which refuses with "LOCKED" via cmd_is_folder_locked.
+  // Without this, web freely served any passworded folder's contents,
+  // and hidden folders revealed via search bypassed the password modal.
+  if (await locks.isFolderLockedAsync(folderId)) {
+    throw new Error("LOCKED");
+  }
   const c = await ensureClient();
-  const entity = await c.getInputEntity(bigInt(folderId));
+  // Saved Messages = the user's chat with themselves. gramjs accepts the
+  // "me" sentinel and resolves to the self peer. For [TD] folders we
+  // resolve the channel by id like before.
+  const target: "me" | Awaited<ReturnType<typeof c.getInputEntity>> =
+    folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
   const out: FileMetadata[] = [];
-  for await (const msg of c.iterMessages(entity, { limit: 500 })) {
+  for await (const msg of c.iterMessages(target, { limit: 500 })) {
     const m = mapMessageToFile(msg, folderId);
     if (m) out.push(m);
   }

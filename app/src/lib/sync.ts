@@ -220,6 +220,12 @@ async function applySnapshot(snap: Snapshot): Promise<void> {
       await invoke("cmd_import_lock_attempts", { attempts: snap.lockAttempts });
     } catch { /* same */ }
   }
+  // Notify React-side caches that depend on this data to re-fetch.
+  // useFolderLocks listens for this and re-runs cmd_list_*_locked_keys
+  // so the sidebar lock badges update without a reload. useAppSettings
+  // and useFolderPrefs already update their module-level state directly
+  // via setSettingsFromSync / setPrefsFromSync.
+  window.dispatchEvent(new Event("td:sync-applied"));
 }
 
 function hasMeaningfulLocalState(): boolean {

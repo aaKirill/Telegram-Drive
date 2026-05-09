@@ -7,6 +7,10 @@ interface BandwidthWidgetProps {
 
 export function BandwidthWidget({ bandwidth }: BandwidthWidgetProps) {
     if (!bandwidth) return null;
+    // Web build doesn't track bandwidth — cmd_get_bandwidth returns 0/0
+    // hardcoded — so the bar is permanently empty and confusing. Hide
+    // the widget entirely there.
+    if (import.meta.env.VITE_TARGET === 'web') return null;
 
     const totalBytes = bandwidth.up_bytes + bandwidth.down_bytes;
     const limit = 250 * 1024 * 1024 * 1024; // 250GB

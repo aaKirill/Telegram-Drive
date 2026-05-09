@@ -207,7 +207,7 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                 <div className="text-center mb-8">
                     <div className="w-20 h-20 mb-6 mx-auto flex items-center justify-center filter drop-shadow-lg">
                         <img
-                            src={`${import.meta.env.BASE_URL}${import.meta.env.VITE_TARGET === 'web' ? 'logo-transparent.png' : 'logo.png'}`}
+                            src={`${import.meta.env.BASE_URL}logo-transparent.png`}
                             alt="Logo"
                             className="w-full h-full"
                         />

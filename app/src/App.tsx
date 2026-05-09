@@ -131,9 +131,26 @@ function AppContent() {
 
     // Pull cross-device snapshot once we know the user is authenticated.
     // Failure is silent — sync is best-effort and shouldn't block the UI.
+    // Also pulls again whenever the window gains focus / becomes visible
+    // — without this, a change made on another device wouldn't propagate
+    // to this one until the next manual settings change or app launch.
     useEffect(() => {
         if (authState !== "authenticated") return;
-        import("./lib/sync").then((m) => m.runSync()).catch(() => { });
+        let cancelled = false;
+        const pull = () => {
+            if (cancelled) return;
+            import("./lib/sync").then((m) => m.runSync()).catch(() => { });
+        };
+        pull();
+        const onFocus = () => pull();
+        const onVisible = () => { if (!document.hidden) pull(); };
+        window.addEventListener("focus", onFocus);
+        document.addEventListener("visibilitychange", onVisible);
+        return () => {
+            cancelled = true;
+            window.removeEventListener("focus", onFocus);
+            document.removeEventListener("visibilitychange", onVisible);
+        };
     }, [authState]);
 
     /** Called by LockScreen on successful passcode entry. The session bytes

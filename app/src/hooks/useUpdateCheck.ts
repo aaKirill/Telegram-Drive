@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer } from 'react';
 import { check, Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { toast } from 'sonner';
 import { useAppSettings } from './useAppSettings';
 
 interface UpdateState {
@@ -81,9 +82,28 @@ export async function downloadAndInstall(): Promise<void> {
                 }
             }
         });
+    } catch (err: unknown) {
+        const msg = stringifyErr(err);
+        setState({ downloading: false, error: msg });
+        toast.error(`Update failed: ${msg}`, { duration: 10000 });
+        console.error("[updater] downloadAndInstall failed:", err);
+        return;
+    }
+
+    // Install succeeded. Try to auto-relaunch into the new bundle. If
+    // relaunch fails (e.g. capability misconfigured, OS rejected the
+    // spawn) the user is otherwise stranded on the old version with no
+    // clue the install worked — the toast is the fallback.
+    try {
         await relaunch();
     } catch (err: unknown) {
-        setState({ downloading: false, error: stringifyErr(err) });
+        const msg = stringifyErr(err);
+        console.error("[updater] relaunch failed:", err);
+        setState({ downloading: false });
+        toast.success(
+            `Update installed. Please quit and reopen the app to apply.\n(Auto-restart failed: ${msg})`,
+            { duration: 30000 },
+        );
     }
 }
 

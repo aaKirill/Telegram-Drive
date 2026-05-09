@@ -386,10 +386,8 @@ pub async fn cmd_get_files(
         return Ok(Vec::new()); // No mock files for now
     }
     let client = client_opt.unwrap();
-    let mut files = Vec::new();
 
     let my_gen = state.generation.load(std::sync::atomic::Ordering::SeqCst);
-    let peer = resolve_peer(&client, folder_id, &state.peer_cache).await?;
 
     // Walk every message and let push_file_from_message decide. Earlier
     // versions used messages.Search with media-type filters for Saved
@@ -397,17 +395,52 @@ pub async fn cmd_get_files(
     // is quirky — certain documents (epub, pages, xlsx, audio with
     // metadata) didn't surface, and chasing every category would mean
     // running 7+ filtered searches and still missing edge cases. The
-    // generation token cancels orphan walks on webview reload, which was
-    // the actual cause of the perceived slowness; with that fixed, an
-    // unfiltered iter_messages on Saved Messages is complete and fast
-    // enough.
-    let mut msgs = client.iter_messages(&peer);
-    while let Some(msg) = msgs.next().await.map_err(|e| e.to_string())? {
-        if state.generation.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
-            log::info!("[fs] cmd_get_files cancelled at {} files", files.len());
-            return Ok(files);
+    // generation token cancels orphan walks on webview reload.
+    //
+    // The walk runs in its own attempt loop: if iter_messages errors
+    // mid-walk (gramjs disconnect, stale access_hash, FLOOD_WAIT, etc.)
+    // we evict the peer from the cache to force a fresh resolve via
+    // iter_dialogs, then retry once. This unsticks the "loaded once,
+    // now stuck — clicking Sync fixes it" pattern. Without the eviction,
+    // a stale cached peer would just keep failing.
+    let mut files = Vec::new();
+    let mut attempts = 0u32;
+    loop {
+        files.clear();
+        let peer = resolve_peer(&client, folder_id, &state.peer_cache).await?;
+        let mut msgs = client.iter_messages(&peer);
+        let mut walk_failed: Option<String> = None;
+        loop {
+            match msgs.next().await {
+                Ok(Some(msg)) => {
+                    if state.generation.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
+                        log::info!("[fs] cmd_get_files cancelled at {} files", files.len());
+                        return Ok(files);
+                    }
+                    push_file_from_message(&mut files, &msg, folder_id);
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    walk_failed = Some(e.to_string());
+                    break;
+                }
+            }
         }
-        push_file_from_message(&mut files, &msg, folder_id);
+        match walk_failed {
+            None => break,
+            Some(err) if attempts == 0 => {
+                attempts += 1;
+                log::warn!(
+                    "[fs] cmd_get_files iter_messages failed ({}): evicting peer cache and retrying",
+                    err,
+                );
+                if let Some(fid) = folder_id {
+                    state.peer_cache.write().await.remove(&fid);
+                }
+                continue;
+            }
+            Some(err) => return Err(err),
+        }
     }
 
     Ok(files)

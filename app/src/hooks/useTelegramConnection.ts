@@ -78,6 +78,26 @@ export function useTelegramConnection(onLogoutParent: () => void) {
         setIsConnected(networkIsOnline);
     }, [networkIsOnline]);
 
+    // Auto-scan folders on first connect when the local cache is empty.
+    // On a fresh web login the IDB-backed plugin-store starts empty, so
+    // the sidebar would show no folders until the user clicked Sync —
+    // and any folder synced from desktop would error with "Error loading
+    // files" because gramjs's entity cache hadn't seen it yet. Fires
+    // once per app session; subsequent runs use the on-disk cache.
+    const [autoScanned, setAutoScanned] = useState(false);
+    useEffect(() => {
+        if (autoScanned) return;
+        if (!foldersLoaded || !isConnected || !store) return;
+        if (folders.length > 0) { setAutoScanned(true); return; }
+        setAutoScanned(true);
+        invoke<TelegramFolder[]>('cmd_scan_folders').then(async (found) => {
+            if (found.length === 0) return;
+            setFolders(found);
+            await store.set('folders', found);
+            await store.save();
+        }).catch(() => { /* swallow — user can still click Sync manually */ });
+    }, [autoScanned, foldersLoaded, isConnected, store, folders.length]);
+
 
     const isNetworkError = (error: string): boolean => {
         const keywords = ['timeout', 'connection', 'network', 'socket', 'disconnected', 'EOF', 'ECONNREFUSED', 'overflow'];

@@ -46,7 +46,19 @@ export async function setLock(folderId: number | null, password: string): Promis
     outputType: "encoded",
   });
   await idbSet(LOCK_KEY_PREFIX + folderKeyStr(folderId), phc);
-  unlockedFolders.add(folderKeyStr(folderId));
+  // Do NOT auto-unlock after setting. Setting a password should
+  // immediately gate access until the user types it again — matches
+  // user expectation that "lock now == lock now".
+  unlockedFolders.delete(folderKeyStr(folderId));
+}
+
+/** True iff the folder has a password AND the current session hasn't
+ *  unlocked it. Used by getFiles to refuse access. */
+export async function isFolderLockedAsync(folderId: number | null): Promise<boolean> {
+  const all = await listAllLockedKeys();
+  const key = folderKeyStr(folderId);
+  if (!all.includes(key)) return false;
+  return !unlockedFolders.has(key);
 }
 
 export async function unlock(folderId: number | null, password: string): Promise<boolean> {

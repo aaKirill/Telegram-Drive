@@ -147,6 +147,19 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
             type: f.icon_type || (f.name.endsWith('/') ? 'folder' : 'file')
         }))),
         enabled: !!store && hasOpenedFolder,
+        // gramjs occasionally drops its WSS connection mid-walk and
+        // auto-reconnects — that throws TIMEOUT inside iter_messages and
+        // RQ's default of 3 retries with sub-second backoff can fall
+        // entirely inside the disconnected window. Retry up to 5 times
+        // with longer exponential backoff (capped at 8 s) so the next
+        // attempt usually lands on a healthy connection.
+        // Don't retry permanent errors like a locked folder.
+        retry: (failureCount, err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (msg === 'LOCKED' || msg.includes('LOCKED')) return false;
+            return failureCount < 5;
+        },
+        retryDelay: attempt => Math.min(1000 * 2 ** attempt, 8000),
     });
 
     const displayedFiles = (() => {
@@ -696,7 +709,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
                         files={displayedFiles}
                         loading={isLoading || isSearching}
-                        error={error}
+                        error={error instanceof Error ? error : error ? new Error(String(error)) : null}
                         viewMode={viewMode}
                         selectedIds={selectedIds}
                         activeFolderId={activeFolderId}
