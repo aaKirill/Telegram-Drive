@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../lib/transport';
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { QueueItem } from '../types';
+import { QueueItem, TelegramFile } from '../types';
 import { useFileDrop } from './useFileDrop';
+import { formatBytes } from '../utils';
 import type { Store } from '@tauri-apps/plugin-store';
 
 interface ProgressPayload {
@@ -63,13 +64,45 @@ export function useFileUpload(activeFolderId: number | null, store: Store | null
         setProcessing(true);
         setUploadQueue(q => q.map(i => i.id === item.id ? { ...i, status: 'uploading', progress: 0 } : i));
         try {
-            await invoke('cmd_upload_file', { path: item.path, folderId: item.folderId, transferId: item.id });
+            const meta = await invoke<TelegramFile | null>('cmd_upload_file', {
+                path: item.path,
+                folderId: item.folderId,
+                transferId: item.id,
+            });
             // Check if cancelled during upload
             if (cancelledRef.current.has(item.id)) {
                 cancelledRef.current.delete(item.id);
             } else {
                 setUploadQueue(q => q.map(i => i.id === item.id ? { ...i, status: 'success', progress: 100 } : i));
-                queryClient.invalidateQueries({ queryKey: ['files', item.folderId] });
+                // Optimistic insert: cmd_upload_file returns the metadata
+                // for the just-sent message, so we splice it into the
+                // React Query cache without waiting for Telegram's
+                // GetHistory replication lag.
+                //
+                // No trailing invalidate. An earlier version scheduled one
+                // per upload, but in a 10-upload burst those refetches
+                // would land mid-burst, return the server's still-
+                // propagating view, and clobber files that had been
+                // optimistic-inserted between the refetch starting and
+                // returning. The send_message response we built `meta`
+                // from is server-confirmed, so the optimistic data is
+                // authoritative for the files we just sent. Refetch
+                // happens when the user navigates folders or clicks Sync.
+                if (meta) {
+                    const newFile: TelegramFile = { ...meta, sizeStr: formatBytes(meta.size) };
+                    queryClient.setQueriesData<TelegramFile[]>(
+                        { queryKey: ['files', item.folderId] },
+                        (old) => {
+                            if (!old) return [newFile];
+                            if (old.some(f => f.id === newFile.id)) return old;
+                            return [newFile, ...old];
+                        },
+                    );
+                } else {
+                    // Belt-and-braces for the unlikely case where the
+                    // Rust side couldn't synthesise metadata at all.
+                    queryClient.invalidateQueries({ queryKey: ['files', item.folderId] });
+                }
             }
         } catch (e) {
             if (!cancelledRef.current.has(item.id)) {
@@ -105,7 +138,13 @@ export function useFileUpload(activeFolderId: number | null, store: Store | null
     const cancelAll = () => {
         setUploadQueue(q => {
             const uploading = q.find(i => i.status === 'uploading');
-            if (uploading) cancelledRef.current.add(uploading.id);
+            if (uploading) {
+                cancelledRef.current.add(uploading.id);
+                // Best-effort cancel signal: the web build wires this into
+                // gramjs progress checks; the Tauri build doesn't have a
+                // matching command and the .catch swallows the rejection.
+                invoke('cmd_cancel_transfer', { transferId: uploading.id }).catch(() => { });
+            }
             return q
                 .filter(i => i.status !== 'pending')
                 .map(i => i.status === 'uploading' ? { ...i, status: 'cancelled' as const } : i);

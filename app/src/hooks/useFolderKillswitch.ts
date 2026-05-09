@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../lib/transport';
 import { load } from '@tauri-apps/plugin-store';
 import { useAppSettings } from './useAppSettings';
 import { TelegramFolder } from '../types';

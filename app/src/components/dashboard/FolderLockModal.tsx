@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../../lib/transport';
 import { Lock, AlertTriangle, X } from 'lucide-react';
 import { useAppSettings } from '../../hooks/useAppSettings';
 
@@ -118,6 +118,9 @@ export function FolderLockModal({ mode, folderName, onClose, onSubmit, folderId 
                     onChange={e => setPassword(e.target.value)}
                     onKeyDown={e => e.key === 'Enter' && !busy && submit()}
                     placeholder={mode === 'set' ? 'New password' : 'Password'}
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                     className="w-full bg-white/10 rounded px-3 py-2 text-sm text-telegram-text focus:outline-none focus:ring-1 focus:ring-telegram-primary mb-2"
                 />
                 {mode === 'set' && (
@@ -127,6 +130,9 @@ export function FolderLockModal({ mode, folderName, onClose, onSubmit, folderId 
                         onChange={e => setConfirm(e.target.value)}
                         onKeyDown={e => e.key === 'Enter' && !busy && submit()}
                         placeholder="Confirm password"
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
                         className="w-full bg-white/10 rounded px-3 py-2 text-sm text-telegram-text focus:outline-none focus:ring-1 focus:ring-telegram-primary mb-2"
                     />
                 )}

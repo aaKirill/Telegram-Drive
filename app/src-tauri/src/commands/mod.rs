@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use grammers_client::{Client};
@@ -35,6 +35,14 @@ pub struct TelegramState {
     /// re-encrypt the live `telegram.session` on graceful shutdown without
     /// re-prompting the user. Zeroized on logout / re-lock.
     pub passcode_key: Arc<std::sync::Mutex<Option<[u8; 32]>>>,
+    /// Bumped on every cmd_connect (which fires on every webview reload).
+    /// Long-running walk commands (cmd_get_files, cmd_scan_folders,
+    /// cmd_sync_read, cmd_search_global) capture this value at start and
+    /// re-check between iterations — when it changes they bail, freeing
+    /// grammers' sender for the fresh request that just came in. Without
+    /// this, orphan walks from prior sessions stack and serialize behind
+    /// each other on reload.
+    pub generation: Arc<AtomicU64>,
 }
 
 pub mod auth;
@@ -45,6 +53,7 @@ pub mod network;
 pub mod streaming;
 pub mod locks;
 pub mod passcode;
+pub mod sync;
 
 pub use auth::*;
 pub use fs::*;
@@ -54,3 +63,4 @@ pub use network::*;
 pub use streaming::*;
 pub use locks::*;
 pub use passcode::*;
+pub use sync::*;

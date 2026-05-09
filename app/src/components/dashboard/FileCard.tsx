@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import { useState, useEffect } from 'react';
 import { Folder, Eye, Trash2 } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../../lib/transport';
 import { TelegramFile } from '../../types';
 import { FileTypeIcon } from '../FileTypeIcon';
 

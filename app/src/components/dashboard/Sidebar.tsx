@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { HardDrive, Folder, Plus, RefreshCw, LogOut, Lock, Unlock, Eye, EyeOff } from 'lucide-react';
+import { HardDrive, Folder, FolderLock, FolderOpen, Plus, RefreshCw, LogOut, Eye, EyeOff } from 'lucide-react';
 import { SidebarItem } from './SidebarItem';
 import { BandwidthWidget } from './BandwidthWidget';
 import { FolderLockModal, LockModalMode } from './FolderLockModal';
@@ -172,7 +172,7 @@ export function Sidebar({
     return (
         <aside className="w-64 bg-telegram-surface border-r border-telegram-border flex flex-col" onClick={e => e.stopPropagation()}>
             <div className="p-4 flex items-center gap-2">
-                <img src="/logo.png" className="w-8 h-8 drop-shadow-lg" alt="Logo" />
+                <img src={`${import.meta.env.BASE_URL}logo.png`} className="w-8 h-8 drop-shadow-lg" alt="Logo" />
                 <span className="font-bold text-lg text-telegram-text tracking-tight">Telegram Drive</span>
             </div>
 
@@ -192,7 +192,7 @@ export function Sidebar({
             <nav className="flex-1 px-2 py-4 space-y-1 overflow-y-auto min-h-0">
                 {showSavedMessages && (
                     <SidebarItem
-                        icon={savedMessagesState === 'locked' ? Lock : savedMessagesState === 'unlocked' ? Unlock : HardDrive}
+                        icon={savedMessagesState === 'locked' ? FolderLock : savedMessagesState === 'unlocked' ? FolderOpen : HardDrive}
                         label="Saved Messages"
                         active={selection.kind === 'home' && savedMessagesState !== 'locked'}
                         onClick={() => handleFolderClick(null)}
@@ -270,7 +270,7 @@ export function Sidebar({
                             }`}
                         >
                         <SidebarItem
-                            icon={state === 'locked' ? Lock : state === 'unlocked' ? Unlock : Folder}
+                            icon={state === 'locked' ? FolderLock : state === 'unlocked' ? FolderOpen : Folder}
                             label={folder.name}
                             active={isActive}
                             onClick={() => handleFolderClick(folder.id)}
@@ -301,6 +301,9 @@ export function Sidebar({
                         <input
                             autoFocus
                             type="text"
+                            autoCorrect="off"
+                            autoCapitalize="off"
+                            spellCheck={false}
                             className="w-full bg-white/10 rounded px-2 py-1 text-sm text-white focus:outline-none focus:ring-1 focus:ring-telegram-primary disabled:opacity-50"
                             placeholder="Folder Name"
                             value={newFolderName}
@@ -313,6 +316,9 @@ export function Sidebar({
                         />
                         <input
                             type="password"
+                            autoCorrect="off"
+                            autoCapitalize="off"
+                            spellCheck={false}
                             className="w-full bg-white/10 rounded px-2 py-1 text-sm text-white focus:outline-none focus:ring-1 focus:ring-telegram-primary disabled:opacity-50"
                             placeholder="Password (optional)"
                             value={newFolderPassword}

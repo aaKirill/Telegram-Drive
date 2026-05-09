@@ -573,30 +573,36 @@ pub async fn cmd_get_thumbnail(
     let key_lock = acquire_preview_lock((folder_id, message_id)).await;
     let _key_guard = key_lock.lock().await;
 
-    // Check for any cached thumbnail for this message
-    // Look for existing cached file
-    if let Ok(entries) = std::fs::read_dir(&cache_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(&format!("{}.", message_id)) {
-                let entry_path = entry.path();
-                let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                if len == 0 {
-                    let _ = std::fs::remove_file(&entry_path);
-                    continue;
-                }
-                if let Ok(bytes) = std::fs::read(&entry_path) {
-                    let ext = name.rsplit('.').next().unwrap_or("jpg");
-                    let mime = match ext {
-                        "png" => "image/png",
-                        "gif" => "image/gif",
-                        "webp" => "image/webp",
-                        _ => "image/jpeg",
-                    };
-                    let b64 = general_purpose::STANDARD.encode(&bytes);
-                    return Ok(format!("data:{};base64,{}", mime, b64));
-                }
-            }
+    // Cache filenames are scoped to (folder_id, message_id). Telegram message
+    // ids are only unique within a channel, so a forwarded/moved file
+    // (same id reused in another channel) would otherwise read another
+    // file's thumbnail off disk. Mirrors cmd_get_preview's naming.
+    let folder_key = folder_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "home".to_string());
+
+    // Direct stat checks per known extension instead of a read_dir scan.
+    // The scan version was O(cache_size) per thumbnail call, which on a
+    // populated 30-card grid added perceptible refresh latency.
+    for ext in &["jpg", "png", "gif", "webp"] {
+        let candidate = cache_dir.join(format!("{}_{}.{}", folder_key, message_id, ext));
+        let meta = match candidate.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.len() == 0 {
+            let _ = std::fs::remove_file(&candidate);
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&candidate) {
+            let mime = match *ext {
+                "png" => "image/png",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                _ => "image/jpeg",
+            };
+            let b64 = general_purpose::STANDARD.encode(&bytes);
+            return Ok(format!("data:{};base64,{}", mime, b64));
         }
     }
 
@@ -647,7 +653,7 @@ pub async fn cmd_get_thumbnail(
                 Plan::WholeDocument(e) => e.clone(),
                 Plan::PhotoThumbs(_) => "jpg".to_string(),
             };
-            let save_path = cache_dir.join(format!("{}.{}", message_id, ext));
+            let save_path = cache_dir.join(format!("{}_{}.{}", folder_key, message_id, ext));
             let save_path_str = save_path.to_string_lossy().to_string();
 
             let ok = match plan {
@@ -663,36 +669,79 @@ pub async fn cmd_get_thumbnail(
                     if thumbs.is_empty() {
                         false
                     } else {
-                        // Pick the smallest *network* thumb available — typically
-                        // 'm' (320px) — for a recognisable grid icon. Inline
-                        // 'i'/'b'/'a' Stripped thumbs are 24×24 reconstructed
-                        // JPEGs, which is what was making cards look blurry.
-                        // The global semaphore in `try_download_photo_thumbs`
-                        // serialises these requests so a 30-card grid won't
-                        // trip FLOOD_WAIT, and on network failure we fall back
-                        // to inline data (low-res but always available).
+                        // Rank network thumbs by photo_type preference rather
+                        // than byte size. The previous strategy of "smallest
+                        // by bytes" picked 's' (100px) whenever it existed,
+                        // which on a retina grid card looks washed out — and
+                        // very old photos sometimes only have 's' available,
+                        // making sort-by-date-asc surface a wall of low-res.
+                        // 'm' (320px) is the sweet spot for cards; cascade
+                        // outward if Telegram doesn't offer it. We try each
+                        // size in order and break on first non-empty
+                        // response so a per-size "0 bytes" quirk falls
+                        // through without giving up.
                         let (network, inline): (Vec<_>, Vec<_>) = thumbs
                             .into_iter()
                             .partition(|t| t.to_data().is_none());
 
-                        let mut net_smallest_first = network;
-                        net_smallest_first.sort_by_key(|t| t.size());
-                        if let Some(smallest) = net_smallest_first.into_iter().next() {
+                        let mut net_ranked = network;
+                        // Prefer 'x' (~800 px) for retina-friendly grid
+                        // cards. 'm' (~320 px) was the previous default
+                        // but visibly soft on HiDPI displays — a 300 logical
+                        // card is 600 physical pixels, so a 320 px source
+                        // upscales. 'x' costs ~3× the bytes per thumb but
+                        // is sharp; the global semaphore plus on-disk
+                        // cache mean it's a one-time hit per file.
+                        net_ranked.sort_by_key(|t| match t.photo_type().as_str() {
+                            "x" => 0u8,
+                            "y" => 1,
+                            "m" => 2,
+                            "w" => 3,
+                            "s" => 4,
+                            _ => 5,
+                        });
+
+                        let mut got_bytes = false;
+                        for thumb in &net_ranked {
                             log::debug!(
                                 "Thumbnail {}: trying network size '{}' ({} bytes)",
-                                message_id, smallest.photo_type(), smallest.size(),
+                                message_id, thumb.photo_type(), thumb.size(),
                             );
-                            if try_download_photo_thumbs(&client, vec![smallest], &save_path).await? {
-                                true
-                            } else if !inline.is_empty() {
-                                log::debug!("Thumbnail {}: network failed, falling back to inline", message_id);
-                                try_inline_thumbs_only(&inline, &save_path)
-                            } else {
-                                false
+                            let permit = thumb_download_semaphore()
+                                .acquire()
+                                .await
+                                .map_err(|e| format!("semaphore closed: {}", e))?;
+                            let r = download_one_thumb(&client, thumb, &save_path).await;
+                            drop(permit);
+                            match r {
+                                Ok(n) if n > 0 => { got_bytes = true; break; }
+                                Ok(_) => {
+                                    let _ = std::fs::remove_file(&save_path);
+                                    log::debug!(
+                                        "Thumbnail {}: '{}' returned 0 bytes, trying next size",
+                                        message_id, thumb.photo_type(),
+                                    );
+                                }
+                                Err(e) => {
+                                    let _ = std::fs::remove_file(&save_path);
+                                    log::warn!(
+                                        "Thumbnail {}: '{}' failed: {}",
+                                        message_id, thumb.photo_type(), e,
+                                    );
+                                }
                             }
-                        } else {
-                            // No network sizes at all — only inline data exists.
+                        }
+
+                        if got_bytes {
+                            true
+                        } else if !inline.is_empty() {
+                            log::debug!(
+                                "Thumbnail {}: all network sizes failed, falling back to inline",
+                                message_id,
+                            );
                             try_inline_thumbs_only(&inline, &save_path)
+                        } else {
+                            false
                         }
                     }
                 }

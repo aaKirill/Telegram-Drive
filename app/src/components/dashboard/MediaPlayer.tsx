@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, ChevronLeft, ChevronRight } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, resolveMediaUrl } from '../../lib/transport';
 import { TelegramFile } from '../../types';
 import { isVideoFile, isAudioFile } from '../../utils';
 
@@ -31,23 +31,24 @@ interface MediaPlayerProps {
 }
 
 export function MediaPlayer({ file, onClose, onNext, onPrev, currentIndex, totalItems, activeFolderId }: MediaPlayerProps) {
-    const [streamInfo, setStreamInfo] = useState<{ token: string; base_url: string } | null>(null);
+    const [streamUrl, setStreamUrl] = useState<string | null>(null);
     const [poster, setPoster] = useState<string | null>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const audioRef = useRef<HTMLAudioElement>(null);
-
-    useEffect(() => {
-        invoke<{ token: string; base_url: string }>('cmd_get_stream_info').then(setStreamInfo).catch(() => {});
-    }, []);
 
     // Files served by global search may live in a different channel than the
     // currently-active folder; honour the file's own folder_id when present.
     const fileFolderId: number | null =
         file.folder_id !== undefined && file.folder_id !== null ? file.folder_id : activeFolderId;
-    const folderIdParam = fileFolderId !== null ? fileFolderId.toString() : 'home';
-    const streamUrl = streamInfo
-        ? `${streamInfo.base_url}/stream/${folderIdParam}/${file.id}?token=${streamInfo.token}`
-        : null;
+
+    useEffect(() => {
+        let cancelled = false;
+        setStreamUrl(null);
+        resolveMediaUrl(fileFolderId, file.id).then((url) => {
+            if (!cancelled) setStreamUrl(url);
+        }).catch(() => {});
+        return () => { cancelled = true; };
+    }, [file.id, fileFolderId]);
 
     const isVideo = isVideoFile(file.name);
     const isAudio = isAudioFile(file.name);

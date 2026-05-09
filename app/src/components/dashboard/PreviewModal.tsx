@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { X, File, ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { invoke } from '../../lib/transport';
+import { convertFileSrc } from '../../lib/transport';
 import { toast } from 'sonner';
 import { TelegramFile } from '../../types';
 import { isImageFile } from '../../utils';

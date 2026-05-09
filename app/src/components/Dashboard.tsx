@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../lib/transport';
 import { toast } from 'sonner';
 
 import { TelegramFile, BandwidthStats } from '../types';
@@ -15,10 +15,15 @@ import { UploadQueue } from './dashboard/UploadQueue';
 import { DownloadQueue } from './dashboard/DownloadQueue';
 import { MoveToFolderModal } from './dashboard/MoveToFolderModal';
 import { PreviewModal } from './dashboard/PreviewModal';
-import { MediaPlayer } from './dashboard/MediaPlayer';
 import { DragDropOverlay } from './dashboard/DragDropOverlay';
 import { ExternalDropBlocker } from './dashboard/ExternalDropBlocker';
-import { PdfViewer } from './dashboard/PdfViewer';
+
+// Heavy panels split into their own chunks. PDF.js (~700KB) and Settings
+// shouldn't sit in the first-load bundle when the user only ever views the
+// file grid.
+const MediaPlayer = lazy(() => import('./dashboard/MediaPlayer').then(m => ({ default: m.MediaPlayer })));
+const PdfViewer = lazy(() => import('./dashboard/PdfViewer').then(m => ({ default: m.PdfViewer })));
+const Settings = lazy(() => import('./Settings').then(m => ({ default: m.Settings })));
 
 // Hooks
 import { useTelegramConnection } from '../hooks/useTelegramConnection';
@@ -29,7 +34,6 @@ import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { useFolderLocks, folderKey } from '../hooks/useFolderLocks';
 import { useAppSettings } from '../hooks/useAppSettings';
 import { useFolderPrefs } from '../hooks/useFolderPrefs';
-import { Settings } from './Settings';
 import { FolderLockModal } from './dashboard/FolderLockModal';
 import { useFolderKillswitch } from '../hooks/useFolderKillswitch';
 
@@ -178,7 +182,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
     } = useFileOperations(activeFolderId, selectedIds, setSelectedIds, displayedFiles);
 
     const { uploadQueue, setUploadQueue, handleManualUpload, cancelAll: cancelUploads, isDragging } = useFileUpload(activeFolderId, store);
-    const { downloadQueue, queueDownload, clearFinished: clearDownloads, cancelAll: cancelDownloads } = useFileDownload(store);
+    const { downloadQueue, queueDownload, clearFinished: clearDownloads, cancelAll: cancelDownloads, dismissItem: dismissDownload } = useFileDownload(store);
 
 
     const handleSelectAll = useCallback(() => {
@@ -435,13 +439,39 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
             try {
                 const idsToMove = selectedIds.includes(fileId) ? selectedIds : [fileId];
 
-                await invoke('cmd_move_files', {
+                const newFiles = await invoke<TelegramFile[]>('cmd_move_files', {
                     messageIds: idsToMove,
                     sourceFolderId: activeFolderId,
                     targetFolderId: targetFolderId
                 });
 
-                queryClient.invalidateQueries({ queryKey: ['files', activeFolderId] });
+                // Optimistic source removal — Telegram's GetHistory has a
+                // read-after-write delay on deletes, so a straight invalidate
+                // would refetch and see the original message still present
+                // for a few hundred ms.
+                const idSet = new Set(idsToMove);
+                queryClient.setQueriesData<TelegramFile[]>(
+                    { queryKey: ['files', activeFolderId] },
+                    (old) => Array.isArray(old) ? old.filter((f) => !idSet.has(f.id)) : old,
+                );
+                // Optimistic target insert — cmd_move_files returns the new
+                // forwarded messages' metadata so we don't have to wait for
+                // a refetch (which can take a minute on Saved Messages).
+                if (Array.isArray(newFiles) && newFiles.length > 0) {
+                    const inserted: TelegramFile[] = newFiles.map((f) => ({
+                        ...f,
+                        sizeStr: formatBytes(f.size),
+                    }));
+                    queryClient.setQueriesData<TelegramFile[]>(
+                        { queryKey: ['files', targetFolderId] },
+                        (old) => {
+                            if (!old) return inserted;
+                            const existingIds = new Set(old.map((x) => x.id));
+                            const additions = inserted.filter((x) => !existingIds.has(x.id));
+                            return additions.length > 0 ? [...additions, ...old] : old;
+                        },
+                    );
+                }
 
                 if (selectedIds.includes(fileId)) setSelectedIds([]);
 
@@ -494,34 +524,36 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                     <MoveToFolderModal
                         folders={folders.filter(f => !folderPrefs.get(f.id).hidden && !locks.isLocked(f.id))}
                         onClose={() => setShowMoveModal(false)}
-                        onSelect={handleBulkMove}
+                        onSelect={(targetFolderId) => handleBulkMove(targetFolderId, () => setShowMoveModal(false))}
                         activeFolderId={activeFolderId}
                         key="move-modal"
                     />
                 )}
                 {playingFile && (
-                    <MediaPlayer
-                        file={playingFile}
-                        onClose={() => setPlayingFile(null)}
-                        onNext={handleNextPreview}
-                        onPrev={handlePrevPreview}
-                        currentIndex={previewContextIndex}
-                        totalItems={previewContextFiles.length}
-                        activeFolderId={activeFolderId}
-                        key="media-player"
-                    />
+                    <Suspense fallback={null} key="media-player">
+                        <MediaPlayer
+                            file={playingFile}
+                            onClose={() => setPlayingFile(null)}
+                            onNext={handleNextPreview}
+                            onPrev={handlePrevPreview}
+                            currentIndex={previewContextIndex}
+                            totalItems={previewContextFiles.length}
+                            activeFolderId={activeFolderId}
+                        />
+                    </Suspense>
                 )}
                 {pdfFile && (
-                    <PdfViewer
-                        file={pdfFile}
-                        onClose={() => setPdfFile(null)}
-                        onNext={handleNextPreview}
-                        onPrev={handlePrevPreview}
-                        currentIndex={previewContextIndex}
-                        totalItems={previewContextFiles.length}
-                        activeFolderId={activeFolderId}
-                        key="pdf-viewer"
-                    />
+                    <Suspense fallback={null} key="pdf-viewer">
+                        <PdfViewer
+                            file={pdfFile}
+                            onClose={() => setPdfFile(null)}
+                            onNext={handleNextPreview}
+                            onPrev={handlePrevPreview}
+                            currentIndex={previewContextIndex}
+                            totalItems={previewContextFiles.length}
+                            activeFolderId={activeFolderId}
+                        />
+                    </Suspense>
                 )}
                 {isDragging && internalDragFileId === null && <DragDropOverlay key="drag-drop-overlay" />}
             </AnimatePresence>
@@ -547,12 +579,14 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
             {showSettings && (
                 <div className="fixed inset-0 z-50 bg-telegram-bg">
-                    <Settings
-                        onClose={() => setShowSettings(false)}
-                        folders={folders}
-                        bandwidth={bandwidth || null}
-                        locks={locks}
-                    />
+                    <Suspense fallback={null}>
+                        <Settings
+                            onClose={() => setShowSettings(false)}
+                            folders={folders}
+                            bandwidth={bandwidth || null}
+                            locks={locks}
+                        />
+                    </Suspense>
                 </div>
             )}
 
@@ -716,6 +750,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                 items={downloadQueue}
                 onClearFinished={clearDownloads}
                 onCancelAll={cancelDownloads}
+                onDismiss={dismissDownload}
             />
         </div>
     );

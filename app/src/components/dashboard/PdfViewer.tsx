@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Maximize } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import { resolveMediaUrl } from '../../lib/transport';
 // Use the legacy build — the modern build uses Map.getOrInsertComputed()
 // which isn't available in Tauri's WebKit WebView
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
@@ -21,7 +21,6 @@ interface PdfViewerProps {
 }
 
 export function PdfViewer({ file, onClose, onNext, onPrev, currentIndex, totalItems, activeFolderId }: PdfViewerProps) {
-    const [streamInfo, setStreamInfo] = useState<{ token: string; base_url: string } | null>(null);
     const [pdf, setPdf] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
     const [numPages, setNumPages] = useState<number>(0);
     const [scale, setScale] = useState<number>(1.2);
@@ -30,61 +29,54 @@ export function PdfViewer({ file, onClose, onNext, onPrev, currentIndex, totalIt
     const containerRef = useRef<HTMLDivElement>(null);
     const pdfRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
 
-    // Fetch stream info once
     useEffect(() => {
-        invoke<{ token: string; base_url: string }>('cmd_get_stream_info').then(setStreamInfo).catch((err) => {
-            console.error("Failed to get stream info:", err);
-            setError("Failed to initialize stream");
-        });
-    }, []);
-
-    // Load PDF document when stream URL is ready or file changes
-    useEffect(() => {
-        if (!streamInfo) return;
-
         let cancelled = false;
+        let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
+
         setLoading(true);
         setError(null);
         setPdf(null);
         setNumPages(0);
 
-        // Honour the file's own folder_id when set (global search results may
-        // live in a different channel than the currently-active folder).
         const fileFolderId =
             file.folder_id !== undefined && file.folder_id !== null ? file.folder_id : activeFolderId;
-        const folderIdParam = fileFolderId !== null ? fileFolderId.toString() : 'home';
-        const streamUrl = `${streamInfo.base_url}/stream/${folderIdParam}/${file.id}?token=${streamInfo.token}`;
 
-        const loadingTask = pdfjsLib.getDocument(streamUrl);
-
-        loadingTask.promise.then(
-            (pdfDoc) => {
-                if (cancelled) {
-                    pdfDoc.destroy();
-                    return;
+        resolveMediaUrl(fileFolderId, file.id).then((url) => {
+            if (cancelled) return;
+            loadingTask = pdfjsLib.getDocument(url);
+            loadingTask.promise.then(
+                (pdfDoc) => {
+                    if (cancelled) {
+                        pdfDoc.destroy();
+                        return;
+                    }
+                    if (pdfRef.current) {
+                        pdfRef.current.destroy();
+                    }
+                    pdfRef.current = pdfDoc;
+                    setPdf(pdfDoc);
+                    setNumPages(pdfDoc.numPages);
+                    setLoading(false);
+                },
+                (err) => {
+                    if (cancelled) return;
+                    console.error("Error loading PDF:", err);
+                    setError("Failed to load PDF document.");
+                    setLoading(false);
                 }
-                // Destroy previous document if any
-                if (pdfRef.current) {
-                    pdfRef.current.destroy();
-                }
-                pdfRef.current = pdfDoc;
-                setPdf(pdfDoc);
-                setNumPages(pdfDoc.numPages);
-                setLoading(false);
-            },
-            (err) => {
-                if (cancelled) return;
-                console.error("Error loading PDF:", err);
-                setError("Failed to load PDF document.");
-                setLoading(false);
-            }
-        );
+            );
+        }).catch((err) => {
+            if (cancelled) return;
+            console.error("Failed to resolve media URL:", err);
+            setError("Failed to initialize document");
+            setLoading(false);
+        });
 
         return () => {
             cancelled = true;
-            loadingTask.destroy();
+            loadingTask?.destroy();
         };
-    }, [streamInfo, activeFolderId, file.id]);
+    }, [activeFolderId, file.id]);
 
     // Cleanup PDF document on unmount
     useEffect(() => {

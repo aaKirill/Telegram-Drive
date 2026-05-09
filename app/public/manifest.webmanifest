@@ -1,0 +1,14 @@
+{
+  "name": "Telegram Drive",
+  "short_name": "TD",
+  "description": "Use Telegram as a file vault.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "icons": [
+    { "src": "logo.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "logo.png", "sizes": "192x192", "type": "image/png", "purpose": "any" }
+  ]
+}

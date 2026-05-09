@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./lib/transport";
 import { Store } from "@tauri-apps/plugin-store";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthWizard } from "./components/AuthWizard";
@@ -128,6 +128,13 @@ function AppContent() {
             cancelled = true;
         };
     }, []);
+
+    // Pull cross-device snapshot once we know the user is authenticated.
+    // Failure is silent — sync is best-effort and shouldn't block the UI.
+    useEffect(() => {
+        if (authState !== "authenticated") return;
+        import("./lib/sync").then((m) => m.runSync()).catch(() => { });
+    }, [authState]);
 
     /** Called by LockScreen on successful passcode entry. The session bytes
      *  are already on disk; we just need to ping Telegram to confirm and

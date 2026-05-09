@@ -163,6 +163,21 @@ pub async fn cmd_connect(
     Ok(true)
 }
 
+/// Called exactly once per fresh JS context (cold start + every webview
+/// reload) from main.tsx. Bumps the generation counter so any in-flight
+/// walk commands from a prior context bail on their next iteration
+/// check, freeing grammers' sender for the fresh React tree's requests.
+///
+/// We intentionally don't tie this to cmd_connect — multiple hooks call
+/// cmd_connect during a single mount and we don't want each one to
+/// cancel the others' work.
+#[tauri::command]
+pub async fn cmd_app_mount(state: State<'_, TelegramState>) -> Result<(), String> {
+    let new_gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    log::info!("cmd_app_mount: generation bumped to {}", new_gen);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn cmd_check_connection(
     app_handle: tauri::AppHandle,

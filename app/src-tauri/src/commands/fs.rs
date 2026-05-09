@@ -156,7 +156,7 @@ pub async fn cmd_upload_file(
     app_handle: tauri::AppHandle,
     state: State<'_, TelegramState>,
     bw_state: State<'_, BandwidthManager>,
-) -> Result<String, String> {
+) -> Result<Option<FileMetadata>, String> {
     let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
     bw_state.can_transfer(size)?;
 
@@ -166,10 +166,10 @@ pub async fn cmd_upload_file(
     if client_opt.is_none() {
         log::info!("[MOCK] Uploaded file {} to {:?}", path, folder_id);
         bw_state.add_up(size);
-        return Ok("Mock upload successful".to_string());
+        return Ok(None);
     }
     let client = client_opt.unwrap();
-    
+
     // Emit start progress
     if !tid.is_empty() {
         let _ = app_handle.emit("upload-progress", ProgressPayload { id: tid.clone(), percent: 0 });
@@ -177,18 +177,18 @@ pub async fn cmd_upload_file(
 
     let path_clone = path.clone();
     let client_clone = client.clone();
-    
+
     let uploaded_file = tauri::async_runtime::spawn(async move {
         client_clone.upload_file(&path_clone).await
     }).await.map_err(|e| format!("Task join error: {}", e))?
       .map_err(map_error)?;
-        
+
     let message = InputMessage::new().text("").file(uploaded_file);
 
     let peer = resolve_peer(&client, folder_id, &state.peer_cache).await?;
-    
-    client.send_message(&peer, message).await.map_err(map_error)?;
-    
+
+    let sent = client.send_message(&peer, message).await.map_err(map_error)?;
+
     bw_state.add_up(size);
 
     // Emit completion
@@ -196,7 +196,43 @@ pub async fn cmd_upload_file(
         let _ = app_handle.emit("upload-progress", ProgressPayload { id: tid, percent: 100 });
     }
 
-    Ok("File uploaded successfully".to_string())
+    // Build FileMetadata from the just-sent message so the frontend can
+    // splice it directly into its React Query cache. Without this, the
+    // caller has to invalidate-and-refetch — which races Telegram's
+    // GetHistory replication lag.
+    //
+    // Prefer the Message-derived metadata since it has the canonical mime
+    // type from Telegram. Fall back to local-file-derived metadata if
+    // Message.media() isn't populated cleanly — grammers occasionally
+    // returns a Message without its media attribute resolved when
+    // Telegram's SendMedia response doesn't include the full updates
+    // payload, and we'd otherwise drop the optimistic insert and force
+    // the frontend to wait on the trailing reconcile.
+    let metadata = {
+        let mut tmp = Vec::new();
+        push_file_from_message(&mut tmp, &sent, folder_id);
+        tmp.into_iter().next().unwrap_or_else(|| {
+            let p = std::path::Path::new(&path);
+            let name = p.file_name()
+                .and_then(|s| s.to_str())
+                .map(String::from)
+                .unwrap_or_else(|| format!("File_{}", sent.id()));
+            let file_ext = p.extension()
+                .and_then(|s| s.to_str())
+                .map(String::from);
+            FileMetadata {
+                id: sent.id() as i64,
+                folder_id,
+                name,
+                size,
+                mime_type: None,
+                file_ext,
+                created_at: sent.date().to_string(),
+                icon_type: "file".into(),
+            }
+        })
+    };
+    Ok(Some(metadata))
 }
 
 #[tauri::command]
@@ -300,29 +336,38 @@ pub async fn cmd_move_files(
     source_folder_id: Option<i64>,
     target_folder_id: Option<i64>,
     state: State<'_, TelegramState>,
-) -> Result<bool, String> {
-    if source_folder_id == target_folder_id { return Ok(true); }
+) -> Result<Vec<FileMetadata>, String> {
+    if source_folder_id == target_folder_id { return Ok(Vec::new()); }
     let client_opt = { state.client.lock().await.clone() };
-    if client_opt.is_none() { 
+    if client_opt.is_none() {
         log::info!("[MOCK] Moved msgs {:?} from {:?} to {:?}", message_ids, source_folder_id, target_folder_id);
-        return Ok(true); 
+        return Ok(Vec::new());
     }
     let client = client_opt.unwrap();
 
     let source_peer = resolve_peer(&client, source_folder_id, &state.peer_cache).await?;
     let target_peer = resolve_peer(&client, target_folder_id, &state.peer_cache).await?;
 
-    match client.forward_messages(&target_peer, &message_ids, &source_peer).await {
-        Ok(_) => {},
-        Err(e) => return Err(format!("Forward failed: {}", e)),
-    }
-    
-    match client.delete_messages(&source_peer, &message_ids).await {
-        Ok(_) => {},
-        Err(e) => return Err(format!("Delete original failed: {}", e)),
+    // forward_messages returns the new Message in the destination peer for
+    // each forwarded id (or None if Telegram dropped it). We use those to
+    // build FileMetadata so the frontend can optimistic-insert into the
+    // target folder cache instead of waiting for a refetch — same pattern
+    // as cmd_upload_file. Otherwise the user sees an instant disappear
+    // from source but a 1-min wait before the file shows in target.
+    let forwarded: Vec<Option<grammers_client::types::Message>> = client
+        .forward_messages(&target_peer, &message_ids, &source_peer)
+        .await
+        .map_err(|e| format!("Forward failed: {}", e))?;
+
+    if let Err(e) = client.delete_messages(&source_peer, &message_ids).await {
+        return Err(format!("Delete original failed: {}", e));
     }
 
-    Ok(true)
+    let mut new_files: Vec<FileMetadata> = Vec::new();
+    for msg in forwarded.into_iter().flatten() {
+        push_file_from_message(&mut new_files, &msg, target_folder_id);
+    }
+    Ok(new_files)
 }
 
 #[tauri::command]
@@ -342,53 +387,82 @@ pub async fn cmd_get_files(
     }
     let client = client_opt.unwrap();
     let mut files = Vec::new();
-    
+
+    let my_gen = state.generation.load(std::sync::atomic::Ordering::SeqCst);
     let peer = resolve_peer(&client, folder_id, &state.peer_cache).await?;
 
+    // Walk every message and let push_file_from_message decide. Earlier
+    // versions used messages.Search with media-type filters for Saved
+    // Messages to skip text noise, but Telegram's filter classification
+    // is quirky — certain documents (epub, pages, xlsx, audio with
+    // metadata) didn't surface, and chasing every category would mean
+    // running 7+ filtered searches and still missing edge cases. The
+    // generation token cancels orphan walks on webview reload, which was
+    // the actual cause of the perceived slowness; with that fixed, an
+    // unfiltered iter_messages on Saved Messages is complete and fast
+    // enough.
     let mut msgs = client.iter_messages(&peer);
     while let Some(msg) = msgs.next().await.map_err(|e| e.to_string())? {
-        if let Some(doc) = msg.media() {
-            let (name, size, mime, ext) = match doc {
-                Media::Document(d) => {
-                    let raw_name = d.name().to_string();
-                    let s = d.size();
-                    let m = d.mime_type().map(|s| s.to_string());
-                    let (n, e) = if raw_name.is_empty() {
-                        let ext = ext_from_mime(m.as_deref());
-                        let prefix = match m.as_deref() {
-                            Some(mt) if mt.starts_with("video/") => "Video",
-                            Some(mt) if mt.starts_with("audio/") => "Audio",
-                            Some(mt) if mt.starts_with("image/") => "Image",
-                            _ => "File",
-                        };
-                        let n = match ext {
-                            Some(ext) => format!("{}_{}.{}", prefix, msg.id(), ext),
-                            None => format!("{}_{}", prefix, msg.id()),
-                        };
-                        (n, ext.map(String::from))
-                    } else {
-                        let ext = std::path::Path::new(&raw_name)
-                            .extension()
-                            .and_then(|os| os.to_str())
-                            .map(|s| s.to_string());
-                        (raw_name, ext)
-                    };
-                    (n, s, m, e)
-                },
-                Media::Photo(p) => {
-                    let s = p.thumbs().iter().map(|ps| ps.size() as i64).max().unwrap_or(0);
-                    ("Photo.jpg".to_string(), s, Some("image/jpeg".into()), Some("jpg".into()))
-                },
-                // Skip stickers, contacts, polls, geo, dice, venues, geolive, webpage — not files
-                _ => continue,
-            };
-            files.push(FileMetadata {
-                id: msg.id() as i64, folder_id, name, size: size as u64, mime_type: mime, file_ext: ext, created_at: msg.date().to_string(), icon_type: "file".into()
-            });
+        if state.generation.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
+            log::info!("[fs] cmd_get_files cancelled at {} files", files.len());
+            return Ok(files);
         }
+        push_file_from_message(&mut files, &msg, folder_id);
     }
 
     Ok(files)
+}
+
+fn push_file_from_message(
+    files: &mut Vec<FileMetadata>,
+    msg: &grammers_client::types::Message,
+    folder_id: Option<i64>,
+) {
+    let media = match msg.media() { Some(m) => m, None => return };
+    let (name, size, mime, ext) = match media {
+        Media::Document(d) => {
+            let raw_name = d.name().to_string();
+            let s = d.size();
+            let m = d.mime_type().map(|s| s.to_string());
+            let (n, e) = if raw_name.is_empty() {
+                let ext = ext_from_mime(m.as_deref());
+                let prefix = match m.as_deref() {
+                    Some(mt) if mt.starts_with("video/") => "Video",
+                    Some(mt) if mt.starts_with("audio/") => "Audio",
+                    Some(mt) if mt.starts_with("image/") => "Image",
+                    _ => "File",
+                };
+                let n = match ext {
+                    Some(ext) => format!("{}_{}.{}", prefix, msg.id(), ext),
+                    None => format!("{}_{}", prefix, msg.id()),
+                };
+                (n, ext.map(String::from))
+            } else {
+                let ext = std::path::Path::new(&raw_name)
+                    .extension()
+                    .and_then(|os| os.to_str())
+                    .map(|s| s.to_string());
+                (raw_name, ext)
+            };
+            (n, s, m, e)
+        }
+        Media::Photo(p) => {
+            let s = p.thumbs().iter().map(|ps| ps.size() as i64).max().unwrap_or(0);
+            ("Photo.jpg".to_string(), s, Some("image/jpeg".into()), Some("jpg".into()))
+        }
+        // Skip stickers, contacts, polls, geo, dice, venues, geolive, webpage — not files
+        _ => return,
+    };
+    files.push(FileMetadata {
+        id: msg.id() as i64,
+        folder_id,
+        name,
+        size: size as u64,
+        mime_type: mime,
+        file_ext: ext,
+        created_at: msg.date().to_string(),
+        icon_type: "file".into(),
+    });
 }
 
 #[tauri::command]
@@ -487,47 +561,19 @@ pub async fn cmd_search_global(
     Ok(files)
 }
 
-async fn match_channel_folder(
-    client: &grammers_client::Client,
-    folders: &mut Vec<FolderMetadata>,
-    id: i64,
-    name: String,
-    access_hash: i64,
-) {
-    log::debug!("[SCAN] Processing Channel: '{}' (ID: {})", name, id);
-
-    if name.to_lowercase().contains("[td]") {
-        log::info!(" -> MATCH via Title: {}", name);
-        let display_name = name
-            .replace(" [TD]", "")
-            .replace(" [td]", "")
-            .replace("[TD]", "")
-            .replace("[td]", "")
-            .trim()
-            .to_string();
-        folders.push(FolderMetadata { id, name: display_name, parent_id: None });
+fn match_channel_folder(folders: &mut Vec<FolderMetadata>, id: i64, name: String) {
+    if !name.to_lowercase().contains("[td]") {
         return;
     }
-
-    let input_chan = tl::enums::InputChannel::Channel(tl::types::InputChannel {
-        channel_id: id,
-        access_hash,
-    });
-
-    match client
-        .invoke(&tl::functions::channels::GetFullChannel { channel: input_chan })
-        .await
-    {
-        Ok(tl::enums::messages::ChatFull::Full(f)) => {
-            if let tl::enums::ChatFull::Full(cf) = f.full_chat {
-                if cf.about.contains("[telegram-drive-folder]") {
-                    log::info!(" -> MATCH via About: {}", name);
-                    folders.push(FolderMetadata { id, name, parent_id: None });
-                }
-            }
-        }
-        Err(e) => log::warn!(" -> Failed to get full info: {}", e),
-    }
+    log::info!(" -> MATCH via Title: {}", name);
+    let display_name = name
+        .replace(" [TD]", "")
+        .replace(" [td]", "")
+        .replace("[TD]", "")
+        .replace("[td]", "")
+        .trim()
+        .to_string();
+    folders.push(FolderMetadata { id, name: display_name, parent_id: None });
 }
 
 #[tauri::command]
@@ -540,6 +586,7 @@ pub async fn cmd_scan_folders(
     }
     let client = client_opt.unwrap();
 
+    let my_gen = state.generation.load(std::sync::atomic::Ordering::SeqCst);
     let mut folders = Vec::new();
     let mut dialogs = client.iter_dialogs();
 
@@ -548,14 +595,17 @@ pub async fn cmd_scan_folders(
     let mut peer_cache = state.peer_cache.write().await;
 
     while let Some(dialog) = dialogs.next().await.map_err(|e| e.to_string())? {
+        if state.generation.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
+            log::info!("[fs] cmd_scan_folders cancelled by newer connect at {} folders", folders.len());
+            return Ok(folders);
+        }
         match &dialog.peer {
             Peer::Channel(c) => {
                 let id = c.raw.id;
                 peer_cache.insert(id, dialog.peer.clone());
 
                 let name = c.raw.title.clone();
-                let access_hash = c.raw.access_hash.unwrap_or(0);
-                match_channel_folder(&client, &mut folders, id, name, access_hash).await;
+                match_channel_folder(&mut folders, id, name);
             },
             Peer::User(u) => {
                 peer_cache.insert(u.raw.id(), dialog.peer.clone());
@@ -576,6 +626,10 @@ pub async fn cmd_scan_folders(
     let mut archive_seen = 0usize;
 
     loop {
+        if state.generation.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
+            log::info!("[fs] cmd_scan_folders archive walk cancelled by newer connect");
+            return Ok(folders);
+        }
         let req = tl::functions::messages::GetDialogs {
             exclude_pinned: false,
             folder_id: Some(1),
@@ -609,8 +663,7 @@ pub async fn cmd_scan_folders(
                     peer_cache.insert(id, Peer::from_raw(chat.clone()));
                 }
                 let name = c.title.clone();
-                let access_hash = c.access_hash.unwrap_or(0);
-                match_channel_folder(&client, &mut folders, id, name, access_hash).await;
+                match_channel_folder(&mut folders, id, name);
             }
         }
 

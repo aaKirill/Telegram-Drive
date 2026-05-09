@@ -1,8 +1,9 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../lib/transport';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { useConfirm } from '../context/ConfirmContext';
 import { TelegramFile } from '../types';
+import { formatBytes } from '../utils';
 
 export function useFileOperations(
     activeFolderId: number | null,
@@ -106,15 +107,34 @@ export function useFileOperations(
         if (selectedIds.length === 0) return;
         const movedIds = [...selectedIds];
         try {
-            await invoke('cmd_move_files', {
+            const newFiles = await invoke<TelegramFile[]>('cmd_move_files', {
                 messageIds: selectedIds,
                 sourceFolderId: activeFolderId,
                 targetFolderId: targetFolderId
             });
             toast.success(`Moved ${selectedIds.length} files.`);
             removeIdsFromCache(movedIds);
+            // Optimistic insert into target folder cache. cmd_move_files
+            // returns the freshly-forwarded messages' metadata so we
+            // don't have to wait on the GetHistory replication lag —
+            // Saved Messages especially can take ~1 min before iter_messages
+            // sees a forwarded message.
+            if (Array.isArray(newFiles) && newFiles.length > 0) {
+                const inserted: TelegramFile[] = newFiles.map((f) => ({
+                    ...f,
+                    sizeStr: formatBytes(f.size),
+                }));
+                queryClient.setQueriesData<TelegramFile[]>(
+                    { queryKey: ['files', targetFolderId] },
+                    (old) => {
+                        if (!old) return inserted;
+                        const existingIds = new Set(old.map((x) => x.id));
+                        const additions = inserted.filter((x) => !existingIds.has(x.id));
+                        return additions.length > 0 ? [...additions, ...old] : old;
+                    },
+                );
+            }
             queryClient.invalidateQueries({ queryKey: ['files', activeFolderId] });
-            queryClient.invalidateQueries({ queryKey: ['files', targetFolderId] });
             setSelectedIds([]);
             if (onSuccess) onSuccess();
         } catch {

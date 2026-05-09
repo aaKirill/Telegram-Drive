@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../lib/transport';
 import { save, open } from '@tauri-apps/plugin-dialog';
 import { useAppSettings } from './useAppSettings';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
@@ -149,7 +149,10 @@ export function useFileDownload(store: Store | null) {
     const cancelAll = () => {
         setDownloadQueue(q => {
             const downloading = q.find(i => i.status === 'downloading');
-            if (downloading) cancelledRef.current.add(downloading.id);
+            if (downloading) {
+                cancelledRef.current.add(downloading.id);
+                invoke('cmd_cancel_transfer', { transferId: downloading.id }).catch(() => { });
+            }
             return q
                 .filter(i => i.status !== 'pending')
                 .map(i => i.status === 'downloading' ? { ...i, status: 'cancelled' as const } : i);
@@ -157,11 +160,16 @@ export function useFileDownload(store: Store | null) {
         toast.info('All downloads cancelled');
     };
 
+    const dismissItem = (id: string) => {
+        setDownloadQueue(q => q.filter(i => i.id !== id));
+    };
+
     return {
         downloadQueue,
         queueDownload,
         queueBulkDownload,
         clearFinished,
-        cancelAll
+        cancelAll,
+        dismissItem,
     };
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../lib/transport';
 
 export const folderKey = (folderId: number | null) => folderId === null ? 'home' : folderId.toString();
 
@@ -25,20 +25,27 @@ export function useFolderLocks() {
     const isLocked = useCallback((folderId: number | null) => lockedKeys.has(folderKey(folderId)), [lockedKeys]);
     const hasPassword = useCallback((folderId: number | null) => allLockedKeys.has(folderKey(folderId)), [allLockedKeys]);
 
+    const markSyncDirty = () => {
+        import('../lib/sync').then(m => m.markDirty()).catch(() => { });
+    };
+
     const setPassword = useCallback(async (folderId: number | null, password: string) => {
         await invoke('cmd_lock_folder', { folderId, password });
         await refresh();
+        markSyncDirty();
     }, [refresh]);
 
     const unlock = useCallback(async (folderId: number | null, password: string): Promise<boolean> => {
         const ok = await invoke<boolean>('cmd_unlock_folder', { folderId, password });
         if (ok) await refresh();
+        markSyncDirty();
         return ok;
     }, [refresh]);
 
     const removeLock = useCallback(async (folderId: number | null, password: string): Promise<boolean> => {
         const ok = await invoke<boolean>('cmd_remove_lock', { folderId, password });
         if (ok) await refresh();
+        markSyncDirty();
         return ok;
     }, [refresh]);
 

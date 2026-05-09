@@ -5,9 +5,10 @@ interface DownloadQueueProps {
     items: DownloadItem[];
     onClearFinished: () => void;
     onCancelAll: () => void;
+    onDismiss?: (id: string) => void;
 }
 
-export function DownloadQueue({ items, onClearFinished, onCancelAll }: DownloadQueueProps) {
+export function DownloadQueue({ items, onClearFinished, onCancelAll, onDismiss }: DownloadQueueProps) {
     if (items.length === 0) return null;
 
     const activeCount = items.filter(i => i.status === 'pending' || i.status === 'downloading').length;
@@ -37,7 +38,9 @@ export function DownloadQueue({ items, onClearFinished, onCancelAll }: DownloadQ
                 </div>
             </div>
             <div className="max-h-60 overflow-y-auto p-2 space-y-2">
-                {items.map(item => (
+                {items.map(item => {
+                    const dismissable = onDismiss && (item.status === 'error' || item.status === 'cancelled' || item.status === 'success');
+                    return (
                     <div key={item.id} className="flex flex-col gap-1 p-2 bg-telegram-hover rounded">
                         <div className="flex items-center gap-3 text-sm">
                             <div className="flex-shrink-0">
@@ -54,6 +57,15 @@ export function DownloadQueue({ items, onClearFinished, onCancelAll }: DownloadQ
                                 <div className="text-xs text-telegram-secondary font-mono">{item.progress}%</div>
                             )}
                             {item.status === 'cancelled' && <div className="text-xs text-gray-400">Cancelled</div>}
+                            {dismissable && (
+                                <button
+                                    onClick={() => onDismiss!(item.id)}
+                                    className="flex-shrink-0 p-0.5 rounded text-telegram-subtext hover:text-telegram-text hover:bg-telegram-border transition-colors"
+                                    title="Dismiss"
+                                >
+                                    <X className="w-3.5 h-3.5" />
+                                </button>
+                            )}
                         </div>
                         {item.status === 'downloading' && (
                             <div className="w-full bg-telegram-border h-1 mt-1 rounded-full overflow-hidden">
@@ -74,7 +86,8 @@ export function DownloadQueue({ items, onClearFinished, onCancelAll }: DownloadQ
                             </div>
                         )}
                     </div>
-                ))}
+                    );
+                })}
             </div>
         </div>
     )

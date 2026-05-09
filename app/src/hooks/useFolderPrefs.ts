@@ -56,6 +56,7 @@ async function updatePref(folderId: number | null, patch: FolderPref) {
     }
     await _store.save();
     notify();
+    import('../lib/sync').then(m => m.markDirty()).catch(() => { });
 }
 
 async function removePref(folderId: number | null) {
@@ -65,6 +66,22 @@ async function removePref(folderId: number | null) {
     await _store.save();
     const { [key]: _, ...rest } = _prefs;
     _prefs = rest;
+    notify();
+    import('../lib/sync').then(m => m.markDirty()).catch(() => { });
+}
+
+export function getCurrentPrefs(): FolderPrefs {
+    return _prefs;
+}
+
+/** Replace the whole prefs map from a remote sync snapshot. */
+export async function setPrefsFromSync(next: FolderPrefs): Promise<void> {
+    if (!_store) _store = await load(STORE_FILE);
+    // Wipe existing keys then write the new state so removed prefs disappear.
+    for (const k of await _store.keys()) await _store.delete(k);
+    for (const [k, v] of Object.entries(next)) await _store.set(k, v);
+    await _store.save();
+    _prefs = { ...next };
     notify();
 }
 

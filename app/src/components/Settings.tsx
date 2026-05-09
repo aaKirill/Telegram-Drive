@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../lib/transport';
 import { getVersion } from '@tauri-apps/api/app';
 import { open } from '@tauri-apps/plugin-dialog';
 import { toast } from 'sonner';
@@ -109,6 +109,8 @@ export function Settings({ onClose, folders, bandwidth, locks }: SettingsProps) 
     const killswitch = useFolderKillswitch();
     const updater = useUpdateCheck();
     const [appVersion, setAppVersion] = useState<string>('');
+
+    const isWebBuild = import.meta.env.VITE_TARGET === 'web';
 
     const folderHasPassword = (folderId: number) => locks.allLockedKeys.has(folderKey(folderId));
 
@@ -256,8 +258,8 @@ export function Settings({ onClose, folders, bandwidth, locks }: SettingsProps) 
                                 </Row>
                             ) : (
                                 <div className="space-y-2 p-3 bg-telegram-hover rounded-md">
-                                    <input type="password" autoFocus value={oldPass} onChange={e => setOldPass(e.target.value)} placeholder="Current passcode" className="w-full bg-telegram-surface rounded px-2 py-1 text-sm" />
-                                    <input type="password" value={newPass} onChange={e => setNewPass(e.target.value)} placeholder="New passcode (min 4 chars)" className="w-full bg-telegram-surface rounded px-2 py-1 text-sm" />
+                                    <input type="password" autoFocus value={oldPass} onChange={e => setOldPass(e.target.value)} placeholder="Current passcode" className="w-full bg-telegram-surface rounded px-2 py-1 text-sm" autoCorrect="off" autoCapitalize="off" spellCheck={false} />
+                                    <input type="password" value={newPass} onChange={e => setNewPass(e.target.value)} placeholder="New passcode (min 4 chars)" className="w-full bg-telegram-surface rounded px-2 py-1 text-sm" autoCorrect="off" autoCapitalize="off" spellCheck={false} />
                                     <div className="flex gap-2 justify-end">
                                         <button onClick={() => { setChanging(false); setOldPass(''); setNewPass(''); }} className="px-3 py-1 text-xs text-telegram-subtext hover:text-telegram-text">Cancel</button>
                                         <button onClick={submitPasscodeChange} className="px-3 py-1 text-xs bg-telegram-primary/20 hover:bg-telegram-primary/30 text-telegram-primary rounded">Apply</button>
@@ -273,7 +275,7 @@ export function Settings({ onClose, folders, bandwidth, locks }: SettingsProps) 
                             ) : (
                                 <div className="space-y-2 p-3 bg-red-500/5 border border-red-500/20 rounded-md">
                                     <div className="text-xs text-red-400">This decrypts your session on disk.</div>
-                                    <input type="password" autoFocus value={removePass} onChange={e => setRemovePass(e.target.value)} placeholder="Confirm with current passcode" className="w-full bg-telegram-surface rounded px-2 py-1 text-sm" />
+                                    <input type="password" autoFocus value={removePass} onChange={e => setRemovePass(e.target.value)} placeholder="Confirm with current passcode" className="w-full bg-telegram-surface rounded px-2 py-1 text-sm" autoCorrect="off" autoCapitalize="off" spellCheck={false} />
                                     <div className="flex gap-2 justify-end">
                                         <button onClick={() => { setRemoving(false); setRemovePass(''); }} className="px-3 py-1 text-xs text-telegram-subtext hover:text-telegram-text">Cancel</button>
                                         <button onClick={submitPasscodeRemove} className="px-3 py-1 text-xs bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded">Disable</button>
@@ -372,48 +374,75 @@ export function Settings({ onClose, folders, bandwidth, locks }: SettingsProps) 
                     </div>
                 </Section>
 
-                <Section title="Downloads">
-                    <Row label="Default download folder" hint={settings.downloadPath || 'Asks you each time.'}>
-                        <div className="flex gap-2">
-                            <button onClick={pickDownloadPath} className="px-3 py-1.5 bg-telegram-hover hover:bg-telegram-border text-xs rounded-md transition flex items-center gap-1.5">
-                                <FolderOpen className="w-3.5 h-3.5" /> Pick…
-                            </button>
-                            {settings.downloadPath && (
-                                <button onClick={clearDownloadPath} className="px-3 py-1.5 bg-telegram-hover hover:bg-telegram-border text-xs rounded-md transition">
-                                    Clear
-                                </button>
-                            )}
-                        </div>
+                <Section title="Sync" description="Cross-device settings sync (folder prefs, locks, killswitch attempts). Each device using the same Telegram account reads/writes a td-sync.json document at this location.">
+                    <Row
+                        label="Sync location"
+                        hint={settings.syncFolderId == null
+                            ? 'Saved Messages (default).'
+                            : `[TD] folder: ${folders.find(f => f.id === settings.syncFolderId)?.name ?? 'unknown'}.`}
+                    >
+                        <select
+                            value={settings.syncFolderId == null ? 'home' : String(settings.syncFolderId)}
+                            onChange={(e) => {
+                                const v = e.target.value;
+                                update('syncFolderId', v === 'home' ? null : Number(v));
+                            }}
+                            className="bg-telegram-hover border border-telegram-border rounded text-sm text-telegram-text px-2 py-1 max-w-[12rem]"
+                        >
+                            <option value="home">Saved Messages</option>
+                            {folders.map(f => (
+                                <option key={f.id} value={String(f.id)}>{f.name}</option>
+                            ))}
+                        </select>
                     </Row>
                 </Section>
 
-                <Section title="Updates">
-                    <Row label="Check for updates on startup" hint="Polls the GitHub releases endpoint 5 seconds after launch.">
-                        <Toggle checked={settings.updateCheckEnabled} onChange={set('updateCheckEnabled')} />
-                    </Row>
-                    <Row
-                        label="Check now"
-                        hint={
-                            updater.error
-                                ? `Last check failed: ${updater.error}`
-                                : updater.available
-                                    ? `Update available: v${updater.version}`
-                                    : updater.notFound
-                                        ? `You're up to date${appVersion ? ` (v${appVersion})` : ''}.`
-                                        : 'Manually query GitHub for a newer release.'
-                        }
-                    >
-                        <button
-                            type="button"
-                            onClick={() => updater.checkForUpdates()}
-                            disabled={updater.checking || updater.downloading}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded bg-telegram-hover hover:bg-telegram-border border border-telegram-border text-telegram-text disabled:opacity-50 disabled:cursor-not-allowed"
+                {!isWebBuild && (
+                    <Section title="Downloads">
+                        <Row label="Default download folder" hint={settings.downloadPath || 'Asks you each time.'}>
+                            <div className="flex gap-2">
+                                <button onClick={pickDownloadPath} className="px-3 py-1.5 bg-telegram-hover hover:bg-telegram-border text-xs rounded-md transition flex items-center gap-1.5">
+                                    <FolderOpen className="w-3.5 h-3.5" /> Pick…
+                                </button>
+                                {settings.downloadPath && (
+                                    <button onClick={clearDownloadPath} className="px-3 py-1.5 bg-telegram-hover hover:bg-telegram-border text-xs rounded-md transition">
+                                        Clear
+                                    </button>
+                                )}
+                            </div>
+                        </Row>
+                    </Section>
+                )}
+
+                {!isWebBuild && (
+                    <Section title="Updates">
+                        <Row label="Check for updates on startup" hint="Polls the GitHub releases endpoint 5 seconds after launch.">
+                            <Toggle checked={settings.updateCheckEnabled} onChange={set('updateCheckEnabled')} />
+                        </Row>
+                        <Row
+                            label="Check now"
+                            hint={
+                                updater.error
+                                    ? `Last check failed: ${updater.error}`
+                                    : updater.available
+                                        ? `Update available: v${updater.version}`
+                                        : updater.notFound
+                                            ? `You're up to date${appVersion ? ` (v${appVersion})` : ''}.`
+                                            : 'Manually query GitHub for a newer release.'
+                            }
                         >
-                            <RefreshCw className={`w-3.5 h-3.5 ${updater.checking ? 'animate-spin' : ''}`} />
-                            {updater.checking ? 'Checking…' : 'Check for updates'}
-                        </button>
-                    </Row>
-                </Section>
+                            <button
+                                type="button"
+                                onClick={() => updater.checkForUpdates()}
+                                disabled={updater.checking || updater.downloading}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded bg-telegram-hover hover:bg-telegram-border border border-telegram-border text-telegram-text disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                <RefreshCw className={`w-3.5 h-3.5 ${updater.checking ? 'animate-spin' : ''}`} />
+                                {updater.checking ? 'Checking…' : 'Check for updates'}
+                            </button>
+                        </Row>
+                    </Section>
+                )}
 
                 <Section
                     title="Killswitch"
@@ -428,12 +457,16 @@ export function Settings({ onClose, folders, bandwidth, locks }: SettingsProps) 
                 </Section>
 
                 <Section title="Storage">
-                    <Row label="Lifetime downloaded">
-                        <span className="text-sm text-telegram-subtext">{formatBytes(lifetimeDown)}</span>
-                    </Row>
-                    <Row label="Lifetime uploaded">
-                        <span className="text-sm text-telegram-subtext">{formatBytes(lifetimeUp)}</span>
-                    </Row>
+                    {!isWebBuild && (
+                        <>
+                            <Row label="Lifetime downloaded">
+                                <span className="text-sm text-telegram-subtext">{formatBytes(lifetimeDown)}</span>
+                            </Row>
+                            <Row label="Lifetime uploaded">
+                                <span className="text-sm text-telegram-subtext">{formatBytes(lifetimeUp)}</span>
+                            </Row>
+                        </>
+                    )}
                     <Row label="Clear thumbnail / preview cache">
                         <button onClick={clearCache} className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs rounded-md transition flex items-center gap-1.5">
                             <Trash2 className="w-3.5 h-3.5" /> Clear cache

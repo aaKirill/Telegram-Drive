@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../lib/transport";
 import { ShieldCheck } from "lucide-react";
 
 interface PasscodeSetupProps {
@@ -76,6 +76,9 @@ export function PasscodeSetup({ onSet }: PasscodeSetupProps) {
                         placeholder="Passcode (min 4 characters)"
                         disabled={busy}
                         autoComplete="new-password"
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
                         className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-lg text-white text-base font-mono tracking-widest focus:outline-none focus:border-blue-400 placeholder:text-gray-500 disabled:opacity-50"
                     />
                     <input
@@ -85,6 +88,9 @@ export function PasscodeSetup({ onSet }: PasscodeSetupProps) {
                         placeholder="Confirm passcode"
                         disabled={busy}
                         autoComplete="new-password"
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
                         className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-lg text-white text-base font-mono tracking-widest focus:outline-none focus:border-blue-400 placeholder:text-gray-500 disabled:opacity-50"
                     />
                     {error && (

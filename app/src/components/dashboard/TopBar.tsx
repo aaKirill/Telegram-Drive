@@ -56,6 +56,9 @@ export function TopBar({
                     className="w-full bg-telegram-hover border border-telegram-border rounded-lg px-3 py-1.5 text-sm text-telegram-text placeholder:text-telegram-subtext focus:outline-none focus:border-telegram-primary/50 transition-colors"
                     value={searchTerm}
                     onChange={(e) => onSearchChange(e.target.value)}
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                 />
             </div>
 

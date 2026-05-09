@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../lib/transport";
 import { motion, AnimatePresence } from "framer-motion";
 import { Phone, Key, Lock, ArrowRight, Settings, ShieldCheck, Sun, Moon, HelpCircle, ExternalLink, X } from "lucide-react";
 import { load } from '@tauri-apps/plugin-store';
@@ -25,9 +25,10 @@ function AuthThemeToggle() {
     );
 }
 export function AuthWizard({ onLogin }: { onLogin: () => void }) {
-    const isBrowser = typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window);
+    const isWebBuild = import.meta.env.VITE_TARGET === 'web';
+    const isStrayBrowser = typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window) && !isWebBuild;
 
-    if (isBrowser) {
+    if (isStrayBrowser) {
         return (
             <div className="flex flex-col items-center justify-center h-full max-w-lg mx-auto p-8 text-center">
                 <div className="w-20 h-20 bg-red-500/20 rounded-full flex items-center justify-center mb-6">
@@ -205,7 +206,7 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
             >
                 <div className="text-center mb-8">
                     <div className="w-20 h-20 mb-6 mx-auto flex items-center justify-center filter drop-shadow-lg">
-                        <img src="/logo.png" alt="Logo" className="w-full h-full" />
+                        <img src={`${import.meta.env.BASE_URL}logo.png`} alt="Logo" className="w-full h-full" />
                     </div>
                     <h1 className="text-2xl font-bold text-white mb-1 tracking-tight">Telegram Drive</h1>
                     <p className="text-sm text-white/60 font-medium">Self-Hosted Secure Storage</p>
@@ -259,6 +260,9 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                                                     value={apiId}
                                                     onChange={(e) => setApiId(e.target.value)}
                                                     placeholder="12345678"
+                                                    autoCorrect="off"
+                                                    autoCapitalize="off"
+                                                    spellCheck={false}
                                                     className="w-full glass-input rounded-xl pl-12 pr-4 py-3.5 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 transition-all font-mono text-sm"
                                                 />
                                             </div>
@@ -272,6 +276,9 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                                                     value={apiHash}
                                                     onChange={(e) => setApiHash(e.target.value)}
                                                     placeholder="abcdef123456..."
+                                                    autoCorrect="off"
+                                                    autoCapitalize="off"
+                                                    spellCheck={false}
                                                     className="w-full glass-input rounded-xl pl-12 pr-4 py-3.5 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 transition-all font-mono text-sm"
                                                 />
                                             </div>
@@ -325,6 +332,9 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                                                 value={phone}
                                                 onChange={(e) => setPhone(e.target.value)}
                                                 placeholder="+1 234 567 8900"
+                                                autoCorrect="off"
+                                                autoCapitalize="off"
+                                                spellCheck={false}
                                                 className="w-full glass-input rounded-xl pl-12 pr-4 py-4 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 transition-all text-lg tracking-wide"
                                             />
                                         </div>
@@ -364,6 +374,9 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                                                 value={code}
                                                 onChange={(e) => setCode(e.target.value)}
                                                 placeholder="1 2 3 4 5"
+                                                autoCorrect="off"
+                                                autoCapitalize="off"
+                                                spellCheck={false}
                                                 className="w-full glass-input rounded-xl pl-12 pr-4 py-4 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 transition-all text-2xl tracking-[0.5em] font-mono text-center"
                                             />
                                         </div>
@@ -409,6 +422,9 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                                                 value={password}
                                                 onChange={(e) => setPassword(e.target.value)}
                                                 placeholder="Enter your password"
+                                                autoCorrect="off"
+                                                autoCapitalize="off"
+                                                spellCheck={false}
                                                 className="w-full glass-input rounded-xl pl-12 pr-4 py-4 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 transition-all text-lg"
                                                 autoFocus
                                             />

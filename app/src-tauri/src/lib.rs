@@ -63,6 +63,7 @@ pub fn run() {
                 peer_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
                 passcode_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 passcode_key: Arc::new(std::sync::Mutex::new(None)),
+                generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             });
             app.manage(bandwidth::BandwidthManager::new(app.handle()));
             app.manage(StreamConfig { token: stream_token.clone(), port: STREAM_PORT });
@@ -131,6 +132,14 @@ pub fn run() {
             commands::cmd_passcode_change,
             commands::cmd_passcode_remove,
             commands::cmd_passcode_reset,
+            commands::cmd_app_mount,
+            commands::cmd_sync_read,
+            commands::cmd_sync_write,
+            commands::cmd_sync_purge,
+            commands::cmd_export_folder_locks,
+            commands::cmd_import_folder_locks,
+            commands::cmd_export_lock_attempts,
+            commands::cmd_import_lock_attempts,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

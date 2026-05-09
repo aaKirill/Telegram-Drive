@@ -19,6 +19,9 @@ export interface AppSettings {
     /** When enabled, 10 consecutive wrong folder password attempts wipe that
      *  folder; 10 wrong app-passcode attempts wipe everything. Default off. */
     killswitchEnabled: boolean;
+    /** Folder where cross-device sync snapshots (td-sync.json) live.
+     *  null = Saved Messages (default). Otherwise a [TD] folder id. */
+    syncFolderId: number | null;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -31,6 +34,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     hideThumbnailsGlobal: false,
     hideThumbnailsForNewFolders: false,
     killswitchEnabled: false,
+    syncFolderId: null,
 };
 
 // Module-level shared state. Without this, every component calling
@@ -67,6 +71,24 @@ export async function updateAppSettingValue<K extends keyof AppSettings>(key: K,
     notify();
     if (!_store) _store = await load(STORE_FILE);
     await _store.set(key, value as any);
+    await _store.save();
+    // Lazy import keeps the sync module out of the cold-start path.
+    import('../lib/sync').then(m => m.markDirty()).catch(() => { });
+}
+
+export function getCurrentSettings(): AppSettings {
+    return _settings;
+}
+
+/** Replace the whole settings object from a remote sync snapshot, without
+ *  triggering another sync push. */
+export async function setSettingsFromSync(next: AppSettings): Promise<void> {
+    _settings = { ...next };
+    notify();
+    if (!_store) _store = await load(STORE_FILE);
+    for (const key of Object.keys(_settings) as (keyof AppSettings)[]) {
+        await _store.set(key, _settings[key] as any);
+    }
     await _store.save();
 }
 

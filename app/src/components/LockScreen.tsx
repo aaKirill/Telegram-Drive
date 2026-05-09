@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../lib/transport";
 import { load } from "@tauri-apps/plugin-store";
 import { Lock } from "lucide-react";
 import { useConfirm } from "../context/ConfirmContext";
@@ -146,6 +146,9 @@ export function LockScreen({ onUnlocked, onReset }: LockScreenProps) {
                         disabled={busy}
                         className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-lg text-white text-base font-mono tracking-widest focus:outline-none focus:border-blue-400 placeholder:text-gray-500 disabled:opacity-50"
                         autoComplete="current-password"
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
                     />
                     {error && (
                         <div className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
