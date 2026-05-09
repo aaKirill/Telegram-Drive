@@ -98,6 +98,53 @@ export function useTelegramConnection(onLogoutParent: () => void) {
         }).catch(() => { /* swallow — user can still click Sync manually */ });
     }, [autoScanned, foldersLoaded, isConnected, store, folders.length]);
 
+    // Folder list is NOT part of the cross-device sync snapshot (which
+    // only carries settings/prefs/locks/attempts). To surface folders
+    // created on another device, silently re-scan on window focus and
+    // visibilitychange and merge any new ids into the local cache. A
+    // 5-minute backstop poll covers the case where focus events don't
+    // fire (Tauri webview inconsistencies, user sitting on the app).
+    useEffect(() => {
+        if (!foldersLoaded || !isConnected || !store) return;
+        let cancelled = false;
+        let inflight = false;
+        const rescan = async () => {
+            if (cancelled || inflight) return;
+            inflight = true;
+            try {
+                const found = await invoke<TelegramFolder[]>('cmd_scan_folders');
+                if (cancelled) return;
+                // Merge: keep existing order, append unseen ids. Don't
+                // remove folders that vanished from the scan — they may
+                // be temporarily unreachable due to a transient peer
+                // resolution failure.
+                let changed = false;
+                const next = [...folders];
+                const have = new Set(folders.map(f => f.id));
+                for (const f of found) {
+                    if (!have.has(f.id)) { next.push(f); changed = true; }
+                }
+                if (changed) {
+                    setFolders(next);
+                    await store.set('folders', next);
+                    await store.save();
+                }
+            } catch { /* silent — manual Sync button still available */ }
+            finally { inflight = false; }
+        };
+        const onFocus = () => { void rescan(); };
+        const onVisible = () => { if (!document.hidden) void rescan(); };
+        window.addEventListener('focus', onFocus);
+        document.addEventListener('visibilitychange', onVisible);
+        const poll = setInterval(() => { void rescan(); }, 5 * 60 * 1000);
+        return () => {
+            cancelled = true;
+            window.removeEventListener('focus', onFocus);
+            document.removeEventListener('visibilitychange', onVisible);
+            clearInterval(poll);
+        };
+    }, [foldersLoaded, isConnected, store, folders]);
+
 
     const isNetworkError = (error: string): boolean => {
         const keywords = ['timeout', 'connection', 'network', 'socket', 'disconnected', 'EOF', 'ECONNREFUSED', 'overflow'];

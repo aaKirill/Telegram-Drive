@@ -32,7 +32,7 @@ export function registerServiceWorkerBridge(): void {
 
 async function handleStreamRequest(
   port: MessagePort,
-  folderId: number,
+  folderId: number | null,
   messageId: number,
   start: number,
   end: number,
@@ -44,7 +44,9 @@ async function handleStreamRequest(
 
   try {
     const c = await ensureClient();
-    const entity = await c.getInputEntity(bigInt(folderId));
+    // null folderId = Saved Messages — gramjs's "me" sentinel resolves
+    // to the self peer.
+    const entity = folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
     const messages = await c.getMessages(entity, { ids: [messageId] });
     const msg = messages[0];
     if (!msg || !msg.media) {

@@ -131,9 +131,10 @@ function AppContent() {
 
     // Pull cross-device snapshot once we know the user is authenticated.
     // Failure is silent — sync is best-effort and shouldn't block the UI.
-    // Also pulls again whenever the window gains focus / becomes visible
-    // — without this, a change made on another device wouldn't propagate
-    // to this one until the next manual settings change or app launch.
+    // Pulls on focus / visibilitychange and again every 5 minutes as a
+    // backstop, since the Tauri webview occasionally swallows focus
+    // events and a user who never tabs away would otherwise never see
+    // remote changes.
     useEffect(() => {
         if (authState !== "authenticated") return;
         let cancelled = false;
@@ -146,10 +147,12 @@ function AppContent() {
         const onVisible = () => { if (!document.hidden) pull(); };
         window.addEventListener("focus", onFocus);
         document.addEventListener("visibilitychange", onVisible);
+        const poll = setInterval(pull, 5 * 60 * 1000);
         return () => {
             cancelled = true;
             window.removeEventListener("focus", onFocus);
             document.removeEventListener("visibilitychange", onVisible);
+            clearInterval(poll);
         };
     }, [authState]);
 

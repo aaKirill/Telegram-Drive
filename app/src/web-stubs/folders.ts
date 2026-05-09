@@ -157,11 +157,13 @@ export async function getFiles(folderId: number | null): Promise<FileMetadata[]>
   const target: "me" | Awaited<ReturnType<typeof c.getInputEntity>> =
     folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
   const out: FileMetadata[] = [];
-  // No limit — walks until the iterator exhausts. Tauri's cmd_get_files
-  // does the same (unbounded iter_messages). The earlier 500 cap meant
-  // a Saved Messages with thousands of items would surface only the
-  // most recent slice. Slow for huge chats but complete.
-  for await (const msg of c.iterMessages(target)) {
+  // 2000-message cap. Removing the cap entirely caused gramjs to hang /
+  // time out mid-walk on chats with thousands of items (browser is
+  // slower than grammers in Rust, and the WSS connection drops on long
+  // walks), leaving the UI stuck on "Loading your files...". 2000 covers
+  // the typical [TD] folder fully and gives Saved Messages the most
+  // recent ~2000 messages worth of media.
+  for await (const msg of c.iterMessages(target, { limit: 2000 })) {
     const m = mapMessageToFile(msg, folderId);
     if (m) out.push(m);
   }
@@ -250,6 +252,14 @@ export function mapMessageToFile(
 
   if (media instanceof Api.MessageMediaDocument && media.document instanceof Api.Document) {
     const doc = media.document;
+    // Stickers are Documents with a Sticker attribute — Tauri's
+    // grammers Media enum splits them out (Media::Sticker), but gramjs
+    // returns them under MessageMediaDocument so we have to filter
+    // explicitly. Otherwise stickers leak into the file list.
+    const isSticker = doc.attributes.some(
+      (a) => a instanceof Api.DocumentAttributeSticker,
+    );
+    if (isSticker) return null;
     const mime = doc.mimeType;
     const { name, ext } = extractFilename(doc, mime);
     return {

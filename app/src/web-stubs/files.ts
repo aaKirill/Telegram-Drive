@@ -279,11 +279,31 @@ async function fetchThumbBlob(
       && msg.media.document instanceof Api.Document
       && (msg.media.document.mimeType ?? "").startsWith("image/");
 
-    if (kind === "preview" && (isPhoto || isImageDoc) && isPhoto) {
+    // For image-Documents (PNGs, JPEGs sent as files / Photo.jpg saves)
+    // the file IS the image, and the embedded thumbs are 24×24 stripped
+    // blurs. Tauri's cmd_get_thumbnail Plan::WholeDocument downloads the
+    // full file in this case; web should match — both for the card
+    // thumbnail and the modal preview. Without this, the web grid shows
+    // pixelated mush for every Photo.jpg in Saved Messages.
+    if (isImageDoc) {
+      const buffer = await c.downloadMedia(msg);
+      if (buffer) {
+        const mime = (msg.media as Api.MessageMediaDocument).document instanceof Api.Document
+          ? ((msg.media as Api.MessageMediaDocument).document as Api.Document).mimeType ?? "image/jpeg"
+          : "image/jpeg";
+        return URL.createObjectURL(new Blob([buffer as Uint8Array], { type: mime }));
+      }
+    }
+
+    // Photos in preview mode get the largest available thumb size.
+    if (kind === "preview" && isPhoto) {
       const buffer = await c.downloadMedia(msg, { thumb: -1 });
       if (buffer) return URL.createObjectURL(new Blob([buffer as Uint8Array], { type: "image/jpeg" }));
     }
 
+    // Default: smallest network thumb (typical 320 px 'm') for grid
+    // cards. For videos this gives the poster; for photo thumbnails
+    // it's the 'm' or 's' size.
     const buffer = await c.downloadMedia(msg, { thumb: 0 });
     if (!buffer) return "";
     return URL.createObjectURL(new Blob([buffer as Uint8Array], { type: "image/jpeg" }));

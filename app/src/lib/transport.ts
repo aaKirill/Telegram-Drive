@@ -11,12 +11,15 @@ export { invoke, convertFileSrc };
 // streaming server; the web build returns a path the Service Worker
 // (public/sw.js) intercepts and answers via the page's gramjs client over
 // MessageChannel — full Range-request support, no full-file buffering.
+//
+// "home" sentinel = Saved Messages (folderId null). Both targets accept
+// it; web's SW regex matches /td-stream/home|<digits>/<digits>$ and the
+// page-side handler resolves "home" to the self peer.
 export async function resolveMediaUrl(folderId: number | null, messageId: number): Promise<string> {
+  const folderIdParam = folderId !== null ? folderId.toString() : "home";
   if (import.meta.env.VITE_TARGET === "web") {
-    if (folderId == null) throw new Error("Web preview can't open a media file without a folder id");
-    return `${import.meta.env.BASE_URL}td-stream/${folderId}/${messageId}`;
+    return `${import.meta.env.BASE_URL}td-stream/${folderIdParam}/${messageId}`;
   }
   const info = await invoke<{ token: string; base_url: string }>("cmd_get_stream_info");
-  const folderIdParam = folderId !== null ? folderId.toString() : "home";
   return `${info.base_url}/stream/${folderIdParam}/${messageId}?token=${info.token}`;
 }

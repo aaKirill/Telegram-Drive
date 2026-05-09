@@ -9,7 +9,10 @@
 //   page → sw: { kind: "error", message }
 //   sw   → page: { kind: "cancel" }            (browser dropped the response)
 
-const STREAM_PATH_RE = /\/td-stream\/(-?\d+)\/(-?\d+)$/;
+// "home" matches Saved Messages (the self peer); a numeric id matches a
+// channel. Both shapes flow through to the page-side handler, which
+// resolves "home" to "me" before calling iterDownload.
+const STREAM_PATH_RE = /\/td-stream\/(home|-?\d+)\/(-?\d+)$/;
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
@@ -18,7 +21,8 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   const m = url.pathname.match(STREAM_PATH_RE);
   if (!m) return;
-  event.respondWith(handleStream(event, Number(m[1]), Number(m[2])));
+  const folderId = m[1] === "home" ? null : Number(m[1]);
+  event.respondWith(handleStream(event, folderId, Number(m[2])));
 });
 
 async function handleStream(event, folderId, messageId) {
