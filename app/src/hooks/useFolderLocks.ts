@@ -48,7 +48,11 @@ export function useFolderLocks() {
     const unlock = useCallback(async (folderId: number | null, password: string): Promise<boolean> => {
         const ok = await invoke<boolean>('cmd_unlock_folder', { folderId, password });
         if (ok) await refresh();
-        markSyncDirty();
+        // Intentionally NOT markSyncDirty here — unlocking is a per-device
+        // accessibility decision (the in-memory unlocked Set), not a global
+        // change. The lockAttempts counter reset is local-only too as a
+        // result; if you fail attempts on web, unlocking on desktop won't
+        // reset web's counter, but that's the correct security posture.
         return ok;
     }, [refresh]);
 

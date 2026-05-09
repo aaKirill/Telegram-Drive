@@ -34,6 +34,35 @@ async fn acquire_preview_lock(key: (Option<i64>, i32)) -> Arc<tokio::sync::Mutex
 /// file-card grid still benefits from a small cap to avoid hammering
 /// Telegram with dozens of concurrent GetFile requests on first paint.
 static THUMB_DOWNLOAD_SEMAPHORE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+
+// Bumped whenever the thumbnail-selection logic changes in a way that makes
+// previously-cached files lower quality than what the current code would
+// produce (e.g. "smallest by bytes" -> "prefer 'x'"). On startup we compare
+// the stored version against this constant; on mismatch we nuke the
+// thumbnails cache so old low-res files get re-fetched at current quality.
+const THUMB_CACHE_VERSION: u32 = 2;
+static THUMB_CACHE_VERSIONED: OnceLock<()> = OnceLock::new();
+
+fn ensure_thumb_cache_version(thumbs_dir: &std::path::Path) {
+    THUMB_CACHE_VERSIONED.get_or_init(|| {
+        let version_file = thumbs_dir.join(".v");
+        let stored: Option<u32> = std::fs::read_to_string(&version_file)
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
+        if stored == Some(THUMB_CACHE_VERSION) {
+            return;
+        }
+        if thumbs_dir.exists() {
+            log::info!(
+                "Thumbnail cache version mismatch (stored={:?}, current={}); wiping {}",
+                stored, THUMB_CACHE_VERSION, thumbs_dir.display(),
+            );
+            let _ = std::fs::remove_dir_all(thumbs_dir);
+        }
+        let _ = std::fs::create_dir_all(thumbs_dir);
+        let _ = std::fs::write(&version_file, THUMB_CACHE_VERSION.to_string());
+    });
+}
 fn thumb_download_semaphore() -> &'static tokio::sync::Semaphore {
     THUMB_DOWNLOAD_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(4))
 }
@@ -563,6 +592,7 @@ pub async fn cmd_get_thumbnail(
         .app_data_dir()
         .map_err(|e: tauri::Error| e.to_string())?
         .join("thumbnails");
+    ensure_thumb_cache_version(&cache_dir);
     if !cache_dir.exists() {
         let _ = std::fs::create_dir_all(&cache_dir);
     }

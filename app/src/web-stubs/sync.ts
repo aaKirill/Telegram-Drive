@@ -7,6 +7,8 @@
 // without scanning the whole chat history.
 
 import { Api } from "telegram";
+import { CustomFile } from "telegram/client/uploads";
+import { Buffer } from "buffer";
 import bigInt from "big-integer";
 import { get as idbGet, set as idbSet } from "idb-keyval";
 import { ensureClient } from "./client";
@@ -168,10 +170,17 @@ export async function syncWrite(bytes: number[] | Uint8Array, folderId: number |
   await runLegacyMigration();
   const c = await ensureClient();
   const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  const file = new File([data], SYNC_FILENAME, { type: "application/json" });
+  // gramjs's _fileToMedia routes raw File through getInputMedia(file) which
+  // throws and is silently caught — sendFile then errors with "Cannot use
+  // [object File] as file." This was why web → desktop sync had been silently
+  // a no-op: every push from web threw without surfacing to the user, so
+  // settings / folder locks created on web never reached Telegram. Wrapping
+  // in CustomFile + Buffer (same as the upload path) skips that branch.
+  const buf = Buffer.from(data);
+  const customFile = new CustomFile(SYNC_FILENAME, buf.length, "", buf);
   const target = await syncTarget(folderId);
 
-  const sentMsg = await c.sendFile(target, { file, forceDocument: true });
+  const sentMsg = await c.sendFile(target, { file: customFile, forceDocument: true });
   // sendFile returns the resulting message; its id is what we want to
   // preserve through the cleanup pass.
   const keepId = sentMsg && "id" in sentMsg ? Number((sentMsg as { id: number | bigInt.BigInteger }).id) : -1;

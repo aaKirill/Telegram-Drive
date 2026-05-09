@@ -35,11 +35,26 @@ async function buildClient(): Promise<TelegramClient> {
   return c;
 }
 
+// Serialize concurrent first-call ensureClient() invocations. Without this,
+// a Dashboard mount that fires useFiles → ensureClient at the same time as
+// App.tsx's bootstrap → cmd_check_connection → ensureClient would each
+// build a separate TelegramClient, racing the session file and producing
+// a hung iter_messages on the loser. The shared connecting Promise means
+// every caller awaits the same handshake.
+let connecting: Promise<TelegramClient> | null = null;
+
 export async function ensureClient(): Promise<TelegramClient> {
   if (client) return client;
-  client = await buildClient();
-  await client.connect();
-  return client;
+  if (!connecting) {
+    connecting = (async () => {
+      const c = await buildClient();
+      await c.connect();
+      client = c;
+      return c;
+    })();
+    connecting.finally(() => { connecting = null; });
+  }
+  return connecting;
 }
 
 async function persistSession(): Promise<void> {
@@ -55,6 +70,12 @@ export async function connect(apiId: number): Promise<void> {
   const store = await Store.load("config.json");
   const apiHash = await store.get<string>("api_hash");
   if (!apiHash) throw new Error("Missing api_hash");
+  // Idempotent on creds match: cmd_connect is called twice on cold start
+  // (App.tsx bootstrap + Dashboard's useTelegramConnection mount). The old
+  // teardown-and-rebuild path raced any iter_messages the dashboard had
+  // already kicked off — they'd be holding a reference to the disconnecting
+  // client and hang forever, leaving the file list stuck on "Loading...".
+  if (client && creds && creds.apiId === apiId && creds.apiHash === apiHash) return;
   creds = { apiId, apiHash };
   if (client) {
     try { await client.disconnect(); } catch {}

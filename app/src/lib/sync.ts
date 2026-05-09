@@ -8,10 +8,12 @@
 // Both Tauri (commands/sync.rs) and web (web-stubs/sync.ts) implement these.
 
 import { invoke } from "./transport";
+import { Store } from "@tauri-apps/plugin-store";
 import {
   DEFAULT_SETTINGS,
   type AppSettings,
   getCurrentSettings,
+  getSyncFolderIdLocalTs,
   setSettingsFromSync,
 } from "../hooks/useAppSettings";
 import {
@@ -19,6 +21,7 @@ import {
   getCurrentPrefs,
   setPrefsFromSync,
 } from "../hooks/useFolderPrefs";
+import type { TelegramFolder } from "../types";
 
 // Folder-lock verifiers are PHC-encoded Argon2id hash strings — same format
 // on Tauri and web — so a verifier hashed by either client can be checked
@@ -33,6 +36,10 @@ interface Snapshot {
   folderPrefs: FolderPrefs;
   folderLocks: Record<string, FolderLockPhc>;
   lockAttempts: Record<string, number>;
+  // Optional in v=1 so older clients that don't write this field stay
+  // forward-compatible (they just ignore the key on parse). Carries the
+  // ordered folder list — without it, deletes/reorders never propagate.
+  folders?: TelegramFolder[];
 }
 
 const DEVICE: "web" | "tauri" =
@@ -98,28 +105,37 @@ export async function runSync(): Promise<void> {
   inflight = (async () => {
     try {
       // If the sync folder selection has changed since the last successful
-      // sync, purge the old location's td-sync.json snapshots before doing
-      // anything else. We compare to a localStorage-recorded "last folder"
-      // (undefined = no previous record).
+      // sync, push the *current local* state to BOTH locations:
+      //   - OLD: serves as a redirect — clients still reading there pick
+      //     up the new syncFolderId from settings and migrate themselves.
+      //   - NEW: ensures the new location reflects current state. Without
+      //     this, a stale snapshot left at the new location from a prior
+      //     visit (e.g. you toggle null → X → null → X again) would be
+      //     pulled-and-applied below and silently roll us back.
+      // After both writes we save and return — there's nothing useful to
+      // pull this cycle (we just authored the network), and any concurrent
+      // remote update will surface on the next runSync.
       const currentFolder = getCurrentSettings().syncFolderId ?? null;
       const previousFolder = loadLastFolder();
       if (previousFolder !== undefined && previousFolder !== currentFolder) {
         try {
-          await invoke("cmd_sync_purge", { folderId: previousFolder });
+          const local = await buildLocalSnapshot();
+          local.ts = Math.max(Date.now(), lastSeenTs + 1);
+          try { await pushSnapshotTo(previousFolder, local); }
+          catch (e) { console.warn("[td] sync redirect write at old folder failed:", e); }
+          try { await pushSnapshotTo(currentFolder, local); }
+          catch (e) { console.warn("[td] sync write at new folder failed:", e); }
+          lastSeenTs = local.ts;
+          saveLastSeen(local.ts);
+          dirty = false;
+          saveLastFolder(currentFolder);
         } catch (e) {
-          // Non-fatal — if the old folder is no longer reachable (deleted
-          // by the user, etc.) we just move on. The orphan snapshots
-          // will sit there inert.
-          console.warn("[td] sync_purge of old folder failed:", e);
+          console.warn("[td] sync migration failed:", e);
         }
-        // Reset lastSeenTs because the new folder's snapshot timeline is
-        // independent — without this we'd refuse to apply a remote that
-        // happens to have a smaller ts than what we'd seen at the OLD
-        // location.
-        lastSeenTs = 0;
-        saveLastSeen(0);
+        return;
       }
 
+      const dirtyAtStart = dirty;
       const remote = await pullSnapshot();
       let appliedRemote = false;
       if (remote && remote.ts > lastSeenTs) {
@@ -128,19 +144,24 @@ export async function runSync(): Promise<void> {
         saveLastSeen(remote.ts);
         appliedRemote = true;
         // Whole-snapshot LWW: any concurrent local changes during the
-        // pull window are accepted as overwritten. The dirty flag is
-        // cleared because the push below would re-write whatever we just
-        // applied; not what the user wants.
-        dirty = false;
+        // pull window are accepted as overwritten. We DON'T clear dirty
+        // here — if the user made a real local change before this run,
+        // we still want to push our current (post-apply, post-merge)
+        // state out so other clients see it.
       }
 
-      if (dirty || (!remote && hasMeaningfulLocalState())) {
+      if (dirty || dirtyAtStart || (!remote && hasMeaningfulLocalState())) {
         const local = await buildLocalSnapshot();
         local.ts = Math.max(Date.now(), lastSeenTs + 1);
-        await pushSnapshot(local);
-        lastSeenTs = local.ts;
-        saveLastSeen(local.ts);
-        dirty = false;
+        try {
+          await pushSnapshot(local);
+          lastSeenTs = local.ts;
+          saveLastSeen(local.ts);
+          dirty = false;
+        } catch (e) {
+          console.warn("[td] sync push failed:", e);
+          // Leave dirty=true so the next runSync retries.
+        }
       }
       // Record the folder we just read from / wrote to so a later
       // selection change can detect the divergence and purge.
@@ -172,9 +193,13 @@ async function pullSnapshot(): Promise<Snapshot | null> {
 }
 
 async function pushSnapshot(snap: Snapshot): Promise<void> {
+  const folderId = getCurrentSettings().syncFolderId ?? null;
+  await pushSnapshotTo(folderId, snap);
+}
+
+async function pushSnapshotTo(folderId: number | null, snap: Snapshot): Promise<void> {
   const json = JSON.stringify(snap);
   const bytes = new TextEncoder().encode(json);
-  const folderId = getCurrentSettings().syncFolderId ?? null;
   await invoke("cmd_sync_write", { bytes: Array.from(bytes), folderId });
 }
 
@@ -199,12 +224,45 @@ async function buildLocalSnapshot(): Promise<Snapshot> {
     folderPrefs,
     folderLocks,
     lockAttempts,
+    folders: await readFoldersFromStore(),
   };
+}
+
+async function readFoldersFromStore(): Promise<TelegramFolder[]> {
+  try {
+    let store = await Store.load("config.json");
+    let folders = await store.get<TelegramFolder[]>("folders");
+    if (!folders) {
+      store = await Store.load("settings.json");
+      folders = await store.get<TelegramFolder[]>("folders");
+    }
+    return folders ?? [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeFoldersToStore(folders: TelegramFolder[]): Promise<void> {
+  try {
+    const store = await Store.load("config.json");
+    await store.set("folders", folders);
+    await store.save();
+  } catch { /* non-fatal — the UI's td:sync-applied listener won't pick up
+                 the change but next focus rescan will */ }
 }
 
 async function applySnapshot(snap: Snapshot): Promise<void> {
   if (snap.settings) {
     const merged: AppSettings = { ...DEFAULT_SETTINGS, ...snap.settings } as AppSettings;
+    // Don't let an older remote snapshot clobber a freshly-made local
+    // syncFolderId choice — when you toggle the sync location back to a
+    // previous one, the redirect we left at the destination still has
+    // syncFolderId=<other> and would otherwise drag us back. Other
+    // settings still apply normally (LWW on whole snapshot).
+    const localTs = getSyncFolderIdLocalTs();
+    if (localTs > 0 && snap.ts < localTs) {
+      merged.syncFolderId = getCurrentSettings().syncFolderId;
+    }
     await setSettingsFromSync(merged);
   }
   if (snap.folderPrefs) {
@@ -219,6 +277,16 @@ async function applySnapshot(snap: Snapshot): Promise<void> {
     try {
       await invoke("cmd_import_lock_attempts", { attempts: snap.lockAttempts });
     } catch { /* same */ }
+  }
+  if (snap.folders) {
+    // LWW replace: write the remote folder list verbatim so deletes /
+    // reorders propagate. Dispatch via CustomEvent with the payload
+    // attached because Tauri's Store plugin hands out per-call handles
+    // with their own in-memory cache — a listener that just re-reads
+    // its own handle would see the stale value, not what we just
+    // persisted from a different handle here.
+    await writeFoldersToStore(snap.folders);
+    window.dispatchEvent(new CustomEvent("td:sync-folders-applied", { detail: snap.folders }));
   }
   // Notify React-side caches that depend on this data to re-fetch.
   // useFolderLocks listens for this and re-runs cmd_list_*_locked_keys

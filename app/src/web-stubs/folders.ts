@@ -156,16 +156,73 @@ export async function getFiles(folderId: number | null): Promise<FileMetadata[]>
   // resolve the channel by id like before.
   const target: "me" | Awaited<ReturnType<typeof c.getInputEntity>> =
     folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
+  // Server-side filtered walks: one filter per media class. Telegram's
+  // InputMessagesFilterDocument only catches "file" docs — audio, voice,
+  // and gifs are separate filters, and missing them dropped the audio /
+  // music files entirely. Photos are their own filter; videos too. Sticker
+  // filtering happens in mapMessageToFile, not here.
+  //
+  // Each walk runs independently via Promise.allSettled so a single failure
+  // (transient WSS drop on reload, peer hash refresh) doesn't sink the
+  // others — the user still sees photos when the docs walk fails and vice
+  // versa. One retry per walk covers the most common case (a single WSS
+  // hiccup mid-load). Per-walk timeout prevents a hung iterator from
+  // leaving the React Query promise pending forever.
+  const FILTER_TIMEOUT_MS = 60_000;
+  const walkOnce = async (filter: Api.TypeMessagesFilter): Promise<FileMetadata[]> => {
+    const found: FileMetadata[] = [];
+    let to: ReturnType<typeof setTimeout> | undefined;
+    const work = (async () => {
+      for await (const msg of c.iterMessages(target, { limit: 2000, filter })) {
+        const m = mapMessageToFile(msg, folderId);
+        if (m) found.push(m);
+      }
+      return found;
+    })();
+    try {
+      return await Promise.race([
+        work,
+        new Promise<FileMetadata[]>((_, reject) => {
+          to = setTimeout(() => reject(new Error("iter_messages timeout")), FILTER_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (to) clearTimeout(to);
+    }
+  };
+  const walk = async (filter: Api.TypeMessagesFilter): Promise<FileMetadata[]> => {
+    try { return await walkOnce(filter); }
+    catch { return await walkOnce(filter); }
+  };
+  const results = await Promise.allSettled([
+    walk(new Api.InputMessagesFilterPhotos()),
+    walk(new Api.InputMessagesFilterDocument()),
+    walk(new Api.InputMessagesFilterVideo()),
+    walk(new Api.InputMessagesFilterMusic()),
+    walk(new Api.InputMessagesFilterVoice()),
+    walk(new Api.InputMessagesFilterGif()),
+    // Unfiltered backstop: catches stragglers with attribute combos that
+    // don't match any of the typed filters (round videos, files with no
+    // recognised attributes, etc.). Bounded to the most recent 2000
+    // messages; the typed filters above pick up older media beyond that
+    // window for chats with > 2000 total messages.
+    walk(new Api.InputMessagesFilterEmpty()),
+  ]);
+  const seen = new Set<number>();
   const out: FileMetadata[] = [];
-  // 2000-message cap. Removing the cap entirely caused gramjs to hang /
-  // time out mid-walk on chats with thousands of items (browser is
-  // slower than grammers in Rust, and the WSS connection drops on long
-  // walks), leaving the UI stuck on "Loading your files...". 2000 covers
-  // the typical [TD] folder fully and gives Saved Messages the most
-  // recent ~2000 messages worth of media.
-  for await (const msg of c.iterMessages(target, { limit: 2000 })) {
-    const m = mapMessageToFile(msg, folderId);
-    if (m) out.push(m);
+  for (const r of results) {
+    if (r.status !== "fulfilled") continue;
+    for (const m of r.value) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      out.push(m);
+    }
+  }
+  // If both walks failed outright, surface the first error so React Query
+  // retries the whole thing instead of caching an empty list as success.
+  if (out.length === 0 && results.every(r => r.status === "rejected")) {
+    const first = results[0] as PromiseRejectedResult;
+    throw new Error(String(first.reason?.message ?? first.reason ?? "scan failed"));
   }
   return out;
 }
@@ -194,11 +251,23 @@ export async function moveFiles(
   // forwardMessages returns the freshly-created Message objects in the
   // destination peer. We map them to FileMetadata so the frontend can
   // optimistic-insert into the target folder cache without waiting on
-  // the GetHistory replication lag.
+  // the GetHistory replication lag (Saved Messages especially can take
+  // ~1 min before iter_messages sees a forwarded message).
+  //
+  // Shape note: gramjs's forwardMessages groups messages by source chat
+  // and pushes one chunk-result per group, where each chunk-result is
+  // itself an array of Messages (the array branch of _getResponseMessage
+  // for ForwardMessages.randomId). So the outer value is array-of-arrays;
+  // we flatten one level before mapping.
   const forwarded = await c.forwardMessages(dst, { messages: messageIds, fromPeer: src });
   await c.deleteMessages(src, messageIds, { revoke: true });
+  const flat: unknown[] = [];
+  for (const item of forwarded ?? []) {
+    if (Array.isArray(item)) flat.push(...item);
+    else flat.push(item);
+  }
   const out: FileMetadata[] = [];
-  for (const msg of forwarded ?? []) {
+  for (const msg of flat) {
     if (!(msg instanceof Api.Message)) continue;
     const m = mapMessageToFile(
       msg as unknown as { id: number; date: number; media?: unknown },

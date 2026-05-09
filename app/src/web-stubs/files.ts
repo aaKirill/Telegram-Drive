@@ -7,10 +7,34 @@
 // pipeline is its own milestone.
 
 import { Api } from "telegram";
+import { CustomFile } from "telegram/client/uploads";
+import { Buffer } from "buffer";
 import bigInt from "big-integer";
 import { ensureClient } from "./client";
 import { emitWebEvent } from "./event";
 import { mapMessageToFile } from "./folders";
+
+// Hard timeout on any single Telegram read so a dropped WSS connection
+// doesn't leave the React Query / preview promise pending forever. The
+// caller's catch falls through to a "Preview Error" message instead of
+// the perpetual "Loading preview..." spinner. Grid thumbnails get a
+// shorter window because there are dozens contending on the readSem and
+// users tolerate a fallback file icon better than a long spinner.
+const PREVIEW_TIMEOUT_MS = 45_000;
+const THUMB_TIMEOUT_MS = 20_000;
+async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let to: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<T>((_, reject) => {
+        to = setTimeout(() => reject(new Error(`${label} timed out after ${Math.floor(ms / 1000)}s`)), ms);
+      }),
+    ]);
+  } finally {
+    if (to) clearTimeout(to);
+  }
+}
 
 type UploadResult = ReturnType<typeof mapMessageToFile>;
 
@@ -71,6 +95,53 @@ function takeRegisteredFile(token: string): File | undefined {
   return f;
 }
 
+// Decode an image File via createImageBitmap (or HTMLImageElement fallback)
+// and downscale to fit a 320 px square — same target Telegram uses for the
+// 'm' photo size. Result is a JPEG passed as the document's embedded thumb;
+// if any step fails (browser can't decode, OOM, exotic format) we return
+// null and the upload proceeds without an embedded thumb (the file just
+// renders with a generic icon until preview, same as before this change).
+// gramjs's _fileToMedia thumb branch accepts string | File | Buffer, but
+// (unlike the main-file branch) NOT CustomFile — it falls through and
+// throws "Could not create file from …". So we return a real File here.
+async function generateThumbForFile(file: File): Promise<File | null> {
+  if (!file.type.startsWith("image/")) return null;
+  try {
+    const bitmap = await loadImageBitmap(file);
+    const max = 320;
+    const ratio = Math.min(max / bitmap.width, max / bitmap.height, 1);
+    const w = Math.max(1, Math.round(bitmap.width * ratio));
+    const h = Math.max(1, Math.round(bitmap.height * ratio));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(bitmap as CanvasImageSource, 0, 0, w, h);
+    if ("close" in bitmap && typeof bitmap.close === "function") bitmap.close();
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob((b) => resolve(b), "image/jpeg", 0.85),
+    );
+    if (!blob) return null;
+    return new File([blob], "thumb.jpg", { type: "image/jpeg" });
+  } catch {
+    return null;
+  }
+}
+
+async function loadImageBitmap(file: File): Promise<ImageBitmap | HTMLImageElement> {
+  if (typeof createImageBitmap === "function") {
+    return await createImageBitmap(file);
+  }
+  return await new Promise<HTMLImageElement>((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+    img.src = url;
+  });
+}
+
 // --- Upload --------------------------------------------------------------
 
 export async function uploadFile(
@@ -86,10 +157,25 @@ export async function uploadFile(
   const c = await ensureClient();
   // null = Saved Messages, gramjs's "me" sentinel resolves to self.
   const entity = folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
+  // gramjs's _fileToMedia mishandles a raw File: typeof === "object" with
+  // no "read" property routes it through getInputMedia(file), which throws
+  // and is silently caught — leaving media=undefined and triggering
+  // "Cannot use [object File] as file." Wrapping in CustomFile + Buffer
+  // skips that branch and goes through the standard upload path. Loads
+  // the whole file into memory; gramjs has no streaming-from-File API.
+  const arrayBuf = await file.arrayBuffer();
+  const customFile = new CustomFile(file.name, file.size, "", Buffer.from(arrayBuf));
+  // For image uploads, generate an embedded thumbnail client-side. grammers
+  // (Tauri) auto-generates one inside upload_file, but gramjs's sendFile
+  // doesn't — without this, a file uploaded from web shows a generic
+  // placeholder icon on every other client (and on the desktop app once
+  // the message syncs over) until the user opens the full preview.
+  const thumb = await generateThumbForFile(file);
   try {
     const sent = await c.sendFile(entity, {
-      file,
+      file: customFile,
       forceDocument: true,
+      thumb: thumb ?? undefined,
       progressCallback: (p) => {
         // Throwing inside the progress callback bubbles up from sendFile
         // and stops further chunk uploads. Telegram's CDN garbage-collects
@@ -285,8 +371,13 @@ async function fetchThumbBlob(
     // full file in this case; web should match — both for the card
     // thumbnail and the modal preview. Without this, the web grid shows
     // pixelated mush for every Photo.jpg in Saved Messages.
+    const tmo = kind === "preview" ? PREVIEW_TIMEOUT_MS : THUMB_TIMEOUT_MS;
     if (isImageDoc) {
-      const buffer = await c.downloadMedia(msg);
+      const buffer = await withTimeout(
+        Promise.resolve(c.downloadMedia(msg)),
+        tmo,
+        `download ${kind}`,
+      );
       if (buffer) {
         const mime = (msg.media as Api.MessageMediaDocument).document instanceof Api.Document
           ? ((msg.media as Api.MessageMediaDocument).document as Api.Document).mimeType ?? "image/jpeg"
@@ -295,18 +386,85 @@ async function fetchThumbBlob(
       }
     }
 
-    // Photos in preview mode get the largest available thumb size.
-    if (kind === "preview" && isPhoto) {
-      const buffer = await c.downloadMedia(msg, { thumb: -1 });
-      if (buffer) return URL.createObjectURL(new Blob([buffer as Uint8Array], { type: "image/jpeg" }));
+    // Preview of a non-image Document: return a whole-document blob URL
+    // so the "Open with system app" button (which on web routes through
+    // openPath → window.open(blob:…)) can hand it to the browser, which
+    // then offers the native viewer / download for zip/docx/epub/xlsx/
+    // json/etc. Without this, getPreview returned "" and the button
+    // failed silently.
+    const isDoc = msg.media instanceof Api.MessageMediaDocument
+      && msg.media.document instanceof Api.Document;
+    if (kind === "preview" && !isPhoto && !isImageDoc && isDoc) {
+      const buffer = await withTimeout(
+        Promise.resolve(c.downloadMedia(msg)),
+        PREVIEW_TIMEOUT_MS,
+        "download preview",
+      );
+      if (buffer) {
+        const doc = (msg.media as Api.MessageMediaDocument).document as Api.Document;
+        const mime = doc.mimeType ?? "application/octet-stream";
+        return URL.createObjectURL(new Blob([buffer as Uint8Array], { type: mime }));
+      }
+      return "";
     }
 
-    // Default: smallest network thumb (typical 320 px 'm') for grid
-    // cards. For videos this gives the poster; for photo thumbnails
-    // it's the 'm' or 's' size.
-    const buffer = await c.downloadMedia(msg, { thumb: 0 });
-    if (!buffer) return "";
-    return URL.createObjectURL(new Blob([buffer as Uint8Array], { type: "image/jpeg" }));
+    // Pick a real network size (skipping PhotoStrippedSize / PhotoPathSize)
+    // and pass its index. gramjs's `thumb: 0` would otherwise hand back
+    // the inline 24×24 stripped blur for any photo whose `sizes[]` starts
+    // with PhotoStrippedSize — which is most of them — making the file
+    // grid look pixel-mush.
+    const sizes: Api.TypePhotoSize[] | null = isPhoto && msg.media instanceof Api.MessageMediaPhoto
+      && msg.media.photo instanceof Api.Photo
+      ? msg.media.photo.sizes
+      : (msg.media instanceof Api.MessageMediaDocument
+          && msg.media.document instanceof Api.Document
+          && msg.media.document.thumbs)
+        ? msg.media.document.thumbs
+        : null;
+    // Try sizes in rank order, falling through on 0-bytes / error — same
+    // strategy as commands/preview.rs's download_one_thumb cascade. Some
+    // photos return empty bytes for their preferred network size under
+    // load (Telegram's edge quirk) but a smaller size succeeds; without
+    // a cascade those cards stayed icon-only.
+    const ranked = sizes ? rankedThumbIndices(sizes, kind) : [];
+    for (const idx of ranked) {
+      try {
+        const buffer = await withTimeout(
+          Promise.resolve(c.downloadMedia(msg, { thumb: idx })),
+          tmo,
+          `download ${kind}`,
+        );
+        if (buffer && (buffer as Uint8Array).byteLength > 0) {
+          return URL.createObjectURL(new Blob([buffer as Uint8Array], { type: "image/jpeg" }));
+        }
+      } catch { /* fall through to next size */ }
+    }
+    return "";
+  });
+}
+
+// Rank network photo sizes by preference, returning indices into the
+// original `sizes` array in try-order. Stripped/Path entries are skipped
+// (they're inline placeholders, not network thumbs).
+function rankedThumbIndices(sizes: Api.TypePhotoSize[], kind: "thumbnail" | "preview"): number[] {
+  const isNetwork = (s: Api.TypePhotoSize) =>
+    !(s instanceof Api.PhotoStrippedSize) && !(s instanceof Api.PhotoPathSize);
+  const areaOf = (s: Api.TypePhotoSize) => {
+    const w = (s as { w?: number }).w ?? 0;
+    const h = (s as { h?: number }).h ?? 0;
+    return w * h;
+  };
+  const eligible: number[] = [];
+  for (let i = 0; i < sizes.length; i++) if (isNetwork(sizes[i])) eligible.push(i);
+  if (kind === "preview") {
+    return eligible.sort((a, b) => areaOf(sizes[b]) - areaOf(sizes[a]));
+  }
+  // Grid: same rank order Tauri uses (commands/preview.rs).
+  const rank: Record<string, number> = { x: 0, y: 1, m: 2, w: 3, s: 4 };
+  return eligible.sort((a, b) => {
+    const ra = rank[(sizes[a] as { type?: string }).type ?? ""] ?? 5;
+    const rb = rank[(sizes[b] as { type?: string }).type ?? ""] ?? 5;
+    return ra - rb;
   });
 }
 

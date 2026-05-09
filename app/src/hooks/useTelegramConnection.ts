@@ -90,13 +90,30 @@ export function useTelegramConnection(onLogoutParent: () => void) {
         if (!foldersLoaded || !isConnected || !store) return;
         if (folders.length > 0) { setAutoScanned(true); return; }
         setAutoScanned(true);
-        invoke<TelegramFolder[]>('cmd_scan_folders').then(async (found) => {
-            if (found.length === 0) return;
-            setFolders(found);
-            await store.set('folders', found);
+        // First scan can come back near-empty on a fresh web login because
+        // gramjs's iter_dialogs hasn't seen the channel list yet — the user
+        // would tab out and back to nudge it. We do that ourselves: retry
+        // 3s and 8s later if the first pass found < 2 [TD] folders.
+        let cancelled = false;
+        const merge = async (found: TelegramFolder[]) => {
+            if (cancelled || found.length === 0) return;
+            const byId = new Map(folders.map(f => [f.id, f]));
+            for (const f of found) byId.set(f.id, f);
+            const merged = Array.from(byId.values());
+            setFolders(merged);
+            await store.set('folders', merged);
             await store.save();
-        }).catch(() => { /* swallow — user can still click Sync manually */ });
-    }, [autoScanned, foldersLoaded, isConnected, store, folders.length]);
+        };
+        const scan = () => invoke<TelegramFolder[]>('cmd_scan_folders').then(merge).catch(() => { });
+        void scan();
+        const t1 = setTimeout(() => { void scan(); }, 3_000);
+        const t2 = setTimeout(() => { void scan(); }, 8_000);
+        return () => {
+            cancelled = true;
+            clearTimeout(t1);
+            clearTimeout(t2);
+        };
+    }, [autoScanned, foldersLoaded, isConnected, store, folders]);
 
     // Folder list is NOT part of the cross-device sync snapshot (which
     // only carries settings/prefs/locks/attempts). To surface folders
@@ -128,6 +145,11 @@ export function useTelegramConnection(onLogoutParent: () => void) {
                     setFolders(next);
                     await store.set('folders', next);
                     await store.save();
+                    // Push the merged list so the OTHER client learns about
+                    // these folders too — without this, a folder created on
+                    // one device only surfaces on the other after a focus
+                    // rescan, never via sync, and the orderings drift.
+                    markSyncDirty();
                 }
             } catch { /* silent — manual Sync button still available */ }
             finally { inflight = false; }
@@ -188,6 +210,26 @@ export function useTelegramConnection(onLogoutParent: () => void) {
         }
     };
 
+    // Apply remote folder list from the sync snapshot. We listen on a
+    // dedicated event with the payload attached rather than re-reading
+    // the store on td:sync-applied, because Tauri's plugin-store hands
+    // out per-call handles — the writer in lib/sync.ts and the reader
+    // here would see different in-memory caches, leaving the sidebar
+    // showing the pre-sync list until reload.
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const fresh = (e as CustomEvent<TelegramFolder[]>).detail;
+            if (Array.isArray(fresh)) setFolders(fresh);
+        };
+        window.addEventListener('td:sync-folders-applied', handler);
+        return () => window.removeEventListener('td:sync-folders-applied', handler);
+    }, []);
+
+    // Lazy import keeps the sync module out of the cold-start path.
+    const markSyncDirty = () => {
+        import('../lib/sync').then(m => m.markDirty()).catch(() => { });
+    };
+
     const handleSyncFolders = async () => {
         if (!store) return;
         setIsSyncing(true);
@@ -224,6 +266,7 @@ export function useTelegramConnection(onLogoutParent: () => void) {
             setFolders(updated);
             await store.set('folders', updated);
             await store.save();
+            markSyncDirty();
             toast.success(`Folder "${name}" created.`);
             return newFolder;
         } catch (e) {
@@ -248,6 +291,7 @@ export function useTelegramConnection(onLogoutParent: () => void) {
         setFolders(reordered);
         await store.set('folders', reordered);
         await store.save();
+        markSyncDirty();
     };
 
     const handleFolderDelete = async (folderId: number, folderName: string) => {
@@ -267,27 +311,27 @@ export function useTelegramConnection(onLogoutParent: () => void) {
                 await store.save();
             }
             if (activeFolderId === folderId) setActiveFolderId(null);
+            markSyncDirty();
             toast.success(`Folder "${folderName}" deleted.`);
         } catch (e: unknown) {
             const errStr = String(e);
-            if (errStr.includes("not found")) {
-                if (await confirm({
-                    title: "Folder Not Found",
-                    message: `Folder "${folderName}" not found on Telegram (it may have been deleted externally).\nRemove from this app?`,
-                    confirmText: "Remove",
-                    variant: 'info'
-                })) {
-                    const updated = folders.filter(f => f.id !== folderId);
-                    setFolders(updated);
-                    if (store) {
-                        await store.set('folders', updated);
-                        await store.save();
-                    }
-                    if (activeFolderId === folderId) setActiveFolderId(null);
+            // CHANNEL_PRIVATE: the folder was already deleted on another
+            // device (e.g. desktop deleted it, web hadn't synced yet). The
+            // local state still has it, so just clean it up here without
+            // surfacing a scary error.
+            if (errStr.includes("CHANNEL_PRIVATE") || errStr.includes("not found")) {
+                const updated = folders.filter(f => f.id !== folderId);
+                setFolders(updated);
+                if (store) {
+                    await store.set('folders', updated);
+                    await store.save();
                 }
-            } else {
-                toast.error(`Failed to delete folder: ${e}`);
+                if (activeFolderId === folderId) setActiveFolderId(null);
+                markSyncDirty();
+                toast.success(`Folder "${folderName}" removed.`);
+                return;
             }
+            toast.error(`Failed to delete folder: ${e}`);
         }
     };
 

@@ -66,12 +66,30 @@ function init(): Promise<void> {
     return _initPromise;
 }
 
+// Timestamp of the last local syncFolderId change. Used by lib/sync.ts to
+// reject stale `syncFolderId` values pushed by a remote whose ts is older —
+// without this, switching the sync folder back to a previously-used one
+// snaps right back: the redirect snapshot we wrote at the destination
+// during the prior migration still has settings.syncFolderId=<other>, and
+// LWW-replacing the local settings on apply reverts the user's choice.
+const SYNC_FOLDER_LOCAL_TS_KEY = "_sync_folder_id_local_ts";
+function getSyncFolderIdLocalTs(): number {
+    if (typeof localStorage === "undefined") return 0;
+    return Number(localStorage.getItem(SYNC_FOLDER_LOCAL_TS_KEY) ?? 0) || 0;
+}
+function recordSyncFolderIdLocalTs(): void {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(SYNC_FOLDER_LOCAL_TS_KEY, String(Date.now()));
+}
+export { getSyncFolderIdLocalTs };
+
 export async function updateAppSettingValue<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
     _settings = { ..._settings, [key]: value };
     notify();
     if (!_store) _store = await load(STORE_FILE);
     await _store.set(key, value as any);
     await _store.save();
+    if (key === "syncFolderId") recordSyncFolderIdLocalTs();
     // Lazy import keeps the sync module out of the cold-start path.
     import('../lib/sync').then(m => m.markDirty()).catch(() => { });
 }
