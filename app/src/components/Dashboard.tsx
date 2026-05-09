@@ -36,6 +36,7 @@ import { useAppSettings } from '../hooks/useAppSettings';
 import { useFolderPrefs } from '../hooks/useFolderPrefs';
 import { FolderLockModal } from './dashboard/FolderLockModal';
 import { useFolderKillswitch } from '../hooks/useFolderKillswitch';
+import { useIsMobile } from '../hooks/useIsMobile';
 
 export function Dashboard({ onLogout }: { onLogout: () => void }) {
     const queryClient = useQueryClient();
@@ -81,6 +82,9 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
             setActiveFolderId(s.id);
         }
     }, [setActiveFolderId]);
+
+    const isMobile = useIsMobile();
+    const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
     const [previewFile, setPreviewFile] = useState<TelegramFile | null>(null);
     // viewMode is derived directly from app settings — no local copy. The
@@ -284,6 +288,22 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
     const handleFileClick = (e: React.MouseEvent, id: number, orderedIds?: number[]) => {
         e.stopPropagation();
 
+        // Mobile: no shift/cmd, no double-click. Tap behaviour depends on
+        // whether we're already in selection mode:
+        //   - Empty selection → tap opens the file (preview/navigate).
+        //   - Selection active → tap toggles. Selection mode is entered
+        //     by tapping the (always-visible) checkbox circle, or by
+        //     long-pressing then choosing Select from the context menu.
+        if (isMobile) {
+            if (selectedIds.length === 0) {
+                const file = displayedFiles.find((f) => f.id === id);
+                if (file) handleFileDoubleClick(file, displayedFiles);
+                return;
+            }
+            handleToggleSelection(id);
+            return;
+        }
+
         // Shift-click extends from the anchor to the clicked item along
         // whatever ordering FileExplorer is showing right now (sorted +
         // type-filtered). Falls back to displayedFiles only if no ordering
@@ -333,6 +353,15 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
     const handleToggleSelection = useCallback((id: number) => {
         setSelectedIds(ids => ids.includes(id) ? ids.filter(i => i !== id) : [...ids, id]);
+        selectionAnchorRef.current = id;
+        anchorIsAdditiveRef.current = true;
+    }, []);
+
+    // Add-only variant for the swipe-to-select gesture. Toggling on each
+    // pass would mean a finger that re-crossed a card mid-swipe would
+    // unselect it, which is the opposite of what gallery swipes do.
+    const handleAddToSelection = useCallback((id: number) => {
+        setSelectedIds(ids => ids.includes(id) ? ids : [...ids, id]);
         selectionAnchorRef.current = id;
         anchorIsAdditiveRef.current = true;
     }, []);
@@ -634,9 +663,15 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                 onLogout={handleLogout}
                 bandwidth={bandwidth || null}
                 locks={locks}
+                isMobile={isMobile}
+                mobileOpen={mobileSidebarOpen}
+                onMobileClose={() => setMobileSidebarOpen(false)}
             />
 
-            <main className="flex-1 flex flex-col" onClick={(e) => { if (e.target === e.currentTarget) setSelectedIds([]); }}>
+            <main
+                className={`flex-1 flex flex-col min-w-0 ${isMobile && selectedIds.length > 0 ? 'pb-14' : ''}`}
+                onClick={(e) => { if (e.target === e.currentTarget) setSelectedIds([]); }}
+            >
                 <TopBar
                     currentFolderName={currentFolderName}
                     selectedIds={selectedIds}
@@ -654,6 +689,8 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                     setViewMode={setViewMode}
                     searchTerm={searchTerm}
                     onSearchChange={setSearchTerm}
+                    isMobile={isMobile}
+                    onMobileMenu={() => setMobileSidebarOpen(true)}
                 />
                 {(() => {
                     const trimmed = searchTerm.trim();
@@ -669,7 +706,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                     return (
                         <>
                             {hiddenMatch && (
-                                <div className="px-6 pt-4">
+                                <div className="px-3 sm:px-6 pt-4">
                                     <button
                                         onClick={() => {
                                             // Sidebar's handleFolderClick gates locked folders behind
@@ -690,7 +727,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                                 </div>
                             )}
                             {trimmed.length > 2 && (
-                                <div className="px-6 pt-4 pb-0">
+                                <div className="px-3 sm:px-6 pt-4 pb-0">
                                     <h2 className="text-sm font-medium text-telegram-subtext">
                                         Search Results for <span className="text-telegram-primary">"{searchTerm}"</span>
                                     </h2>
@@ -702,7 +739,11 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                 {!hasOpenedFolder ? (
                     <div className="flex-1 flex flex-col items-center justify-center text-center text-telegram-subtext p-6">
                         <div className="text-base">No folder open.</div>
-                        <div className="text-sm mt-1">Select a folder from the sidebar to view its files.</div>
+                        <div className="text-sm mt-1">
+                            {isMobile
+                                ? 'Tap the menu icon in the top-left to pick a folder.'
+                                : 'Select a folder from the sidebar to view its files.'}
+                        </div>
                     </div>
                 ) : (
                     <FileExplorer
@@ -714,7 +755,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                         selectedIds={selectedIds}
                         activeFolderId={activeFolderId}
                         onFileClick={handleFileClick}
-                        onFileDoubleClick={handleFileDoubleClick}
+                        onFileDoubleClick={isMobile ? undefined : handleFileDoubleClick}
                         disableThumbnailFor={(file) => {
                             if (appSettings.hideThumbnailsGlobal) return true;
                             const folderId = file.folder_id ?? activeFolderId;
@@ -732,12 +773,44 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                         onManualUpload={handleManualUpload}
                         onSelectionClear={() => setSelectedIds([])}
                         onToggleSelection={handleToggleSelection}
+                        onAddToSelection={isMobile ? handleAddToSelection : undefined}
                         onDrop={handleDropOnFolder}
                         onDragStart={(fileId) => setInternalDragFileId(fileId)}
                         onDragEnd={() => setTimeout(() => setInternalDragFileId(null), 50)}
                     />
                 )}
             </main>
+
+            {isMobile && selectedIds.length > 0 && (
+                <div className="fixed bottom-0 left-0 right-0 z-30 bg-telegram-surface border-t border-telegram-border px-3 py-2 flex items-center gap-2 shadow-[0_-4px_12px_rgba(0,0,0,0.2)]">
+                    <span className="text-xs text-telegram-subtext shrink-0">{selectedIds.length}</span>
+                    <button
+                        onClick={() => setSelectedIds([])}
+                        className="px-2 py-1.5 bg-telegram-hover hover:bg-telegram-border rounded-md text-xs text-telegram-text shrink-0"
+                    >
+                        Clear
+                    </button>
+                    <div className="flex-1" />
+                    <button
+                        onClick={() => setShowMoveModal(true)}
+                        className="px-3 py-1.5 bg-telegram-primary/20 hover:bg-telegram-primary/30 text-telegram-primary rounded-md text-xs font-medium"
+                    >
+                        Move
+                    </button>
+                    <button
+                        onClick={handleBulkDownload}
+                        className="px-3 py-1.5 bg-telegram-hover hover:bg-telegram-border rounded-md text-xs text-telegram-text"
+                    >
+                        Download
+                    </button>
+                    <button
+                        onClick={handleBulkDelete}
+                        className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-md text-xs"
+                    >
+                        Delete
+                    </button>
+                </div>
+            )}
 
             {previewFile && (
                 <PreviewModal

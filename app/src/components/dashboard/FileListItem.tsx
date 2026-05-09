@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Folder, Eye, HardDrive, Plus } from 'lucide-react';
 import { TelegramFile } from '../../types';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { useLongPress } from '../../hooks/useLongPress';
 
 interface FileListItemProps {
     file: TelegramFile;
@@ -25,6 +26,11 @@ export function FileListItem({
     const [isDragOver, setIsDragOver] = useState(false);
     const isFolder = file.type === 'folder';
 
+    const longPress = useLongPress(({ x, y }) => {
+        const synthetic = { preventDefault: () => {}, stopPropagation: () => {}, clientX: x, clientY: y } as unknown as React.MouseEvent;
+        handleContextMenu(synthetic, file);
+    });
+
     return (
         <div
             onClick={(e) => onFileClick(e, file.id)}
@@ -33,6 +39,7 @@ export function FileListItem({
                 if (e.shiftKey) e.preventDefault();
             }}
             onContextMenu={(e) => handleContextMenu(e, file)}
+            {...longPress}
             draggable
             onDragStart={(e) => {
                 if (onDragStart) onDragStart(file.id);
@@ -64,7 +71,8 @@ export function FileListItem({
                     onDrop(e, file.id);
                 }
             }}
-            className={`select-none group grid grid-cols-[2rem_2fr_6rem_8rem] gap-4 items-center px-4 py-3 rounded-lg cursor-pointer border border-transparent transition-all hover:bg-telegram-hover
+            data-file-id={file.id}
+            className={`select-none group grid grid-cols-[2rem_2fr_5rem] sm:grid-cols-[2rem_2fr_6rem_8rem] gap-3 sm:gap-4 items-center px-2 sm:px-4 py-3 rounded-lg cursor-pointer border border-transparent transition-all hover:bg-telegram-hover
                 ${selectedIds.includes(file.id) ? 'bg-telegram-primary/10 border-telegram-primary/20' : ''}
                 ${isDragOver ? 'ring-2 ring-telegram-primary bg-telegram-primary/20' : ''}
             `}
@@ -74,15 +82,15 @@ export function FileListItem({
             </div>
             <div className="truncate text-sm text-telegram-text font-medium relative pr-8">
                 {file.name}
-                {/* List Actions */}
-                <div className="absolute right-0 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 flex items-center bg-telegram-surface border border-telegram-border shadow-lg rounded px-1">
+                {/* List Actions — hidden on mobile (long-press opens context menu instead). */}
+                <div className="hidden md:flex absolute right-0 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 items-center bg-telegram-surface border border-telegram-border shadow-lg rounded px-1">
                     <button onClick={(e) => { e.stopPropagation(); onPreview(file) }} className="p-1 hover:text-telegram-text text-telegram-subtext" title="Preview"><Eye className="w-4 h-4" /></button>
                     <button onClick={(e) => { e.stopPropagation(); onDownload(file.id, file.name) }} className="p-1 hover:text-telegram-text text-telegram-subtext" title="Download"><HardDrive className="w-4 h-4" /></button>
                     <button onClick={(e) => { e.stopPropagation(); onDelete(file.id) }} className="p-1 hover:text-red-400 text-telegram-subtext" title="Delete"><Plus className="w-4 h-4 rotate-45" /></button>
                 </div>
             </div>
             <div className="text-right text-xs text-telegram-subtext truncate">{file.sizeStr}</div>
-            <div className="text-right text-xs text-telegram-subtext font-mono opacity-50 truncate">{file.created_at || '-'}</div>
+            <div className="hidden sm:block text-right text-xs text-telegram-subtext font-mono opacity-50 truncate">{file.created_at || '-'}</div>
         </div>
     );
 }

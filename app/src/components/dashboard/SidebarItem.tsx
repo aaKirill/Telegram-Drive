@@ -31,17 +31,20 @@ export function SidebarItem({ icon: Icon, label, active = false, onClick, onDrop
     const [menuOpen, setMenuOpen] = useState(false);
     const menuRef = useRef<HTMLDivElement | null>(null);
 
-    // Click-outside / Esc to dismiss the popover.
+    // Click-outside / Esc to dismiss the popover. touchstart covers iOS
+    // taps on non-interactive areas where a synthetic click never fires.
     useEffect(() => {
         if (!menuOpen) return;
-        const onDoc = (e: MouseEvent) => {
+        const onOutside = (e: Event) => {
             if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
         };
         const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenuOpen(false); };
-        document.addEventListener('mousedown', onDoc);
+        document.addEventListener('mousedown', onOutside);
+        document.addEventListener('touchstart', onOutside, { passive: true });
         document.addEventListener('keydown', onKey);
         return () => {
-            document.removeEventListener('mousedown', onDoc);
+            document.removeEventListener('mousedown', onOutside);
+            document.removeEventListener('touchstart', onOutside);
             document.removeEventListener('keydown', onKey);
         };
     }, [menuOpen]);
@@ -102,7 +105,7 @@ export function SidebarItem({ icon: Icon, label, active = false, onClick, onDrop
                         role="button"
                         tabIndex={-1}
                         onClick={(e) => { e.stopPropagation(); setMenuOpen(s => !s); }}
-                        className={`p-1 rounded transition-opacity hover:bg-telegram-hover/60 ${menuOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                        className={`p-1 rounded transition-opacity hover:bg-telegram-hover/60 ${menuOpen ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}
                         title="More"
                     >
                         <MoreVertical className="w-3.5 h-3.5" />

@@ -31,6 +31,13 @@ interface SidebarProps {
     onLogout: () => void;
     bandwidth: BandwidthStats | null;
     locks: FolderLocks;
+    /** True when the viewport is mobile. The sidebar becomes a slide-in
+     *  drawer in that case — the parent controls visibility via
+     *  `mobileOpen` and dismisses via `onMobileClose` (backdrop click,
+     *  Esc, or after the user picks a folder). */
+    isMobile?: boolean;
+    mobileOpen?: boolean;
+    onMobileClose?: () => void;
 }
 
 interface PendingLockAction {
@@ -44,7 +51,8 @@ const selectionFolderId = (s: FolderSelection): number | null | undefined =>
 
 export function Sidebar({
     folders, hiddenFolderIds, selection, setSelection, onDrop, onDelete, onCreate, onReorderFolders,
-    isSyncing, isConnected, onSync, onLogout, bandwidth, locks
+    isSyncing, isConnected, onSync, onLogout, bandwidth, locks,
+    isMobile = false, mobileOpen = false, onMobileClose,
 }: SidebarProps) {
     const [reorderDragId, setReorderDragId] = useState<number | null>(null);
     const [reorderOverId, setReorderOverId] = useState<number | null>(null);
@@ -115,6 +123,10 @@ export function Sidebar({
             setPending({ folderId, folderName, mode: 'unlock' });
         } else {
             setSelection(folderId === null ? { kind: 'home' } : { kind: 'folder', id: folderId });
+            // On mobile the sidebar is a drawer over the content — once a
+            // folder is picked there's nothing useful left to do here, so
+            // auto-dismiss to reveal the file grid.
+            if (isMobile && onMobileClose) onMobileClose();
         }
     };
 
@@ -169,8 +181,23 @@ export function Sidebar({
         return n;
     }, [locks.lockedKeys, hiddenFolderIds]);
 
+    // On mobile the sidebar is rendered as a fixed slide-in drawer with a
+    // dim backdrop. On desktop it stays an in-flow column at its natural
+    // width — same `w-64` as before.
+    const asideClass = isMobile
+        ? `fixed inset-y-0 left-0 z-40 w-72 max-w-[85vw] bg-telegram-surface border-r border-telegram-border flex flex-col transform transition-transform duration-200 ease-out ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`
+        : 'w-64 bg-telegram-surface border-r border-telegram-border flex flex-col';
+
     return (
-        <aside className="w-64 bg-telegram-surface border-r border-telegram-border flex flex-col" onClick={e => e.stopPropagation()}>
+        <>
+            {isMobile && mobileOpen && (
+                <div
+                    className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm transition-opacity"
+                    onClick={onMobileClose}
+                    aria-hidden="true"
+                />
+            )}
+            <aside className={asideClass} onClick={e => e.stopPropagation()}>
             <div className="p-4 flex items-center gap-2">
                 <img
                     src={`${import.meta.env.BASE_URL}logo-transparent.png`}
@@ -213,7 +240,7 @@ export function Sidebar({
                     return (
                         <div
                             key={folder.id}
-                            draggable
+                            draggable={!isMobile}
                             onDragStart={(e) => {
                                 e.dataTransfer.setData(REORDER_TYPE, String(folder.id));
                                 e.dataTransfer.effectAllowed = 'move';
@@ -410,5 +437,6 @@ export function Sidebar({
                 />
             )}
         </aside>
+        </>
     );
 }

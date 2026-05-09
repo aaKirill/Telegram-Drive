@@ -38,6 +38,11 @@ interface FileExplorerProps {
     onManualUpload: () => void;
     onSelectionClear: () => void;
     onToggleSelection: (id: number) => void;
+    /** Mobile-only: gallery-style swipe-to-select. Touch starts on a card's
+     *  checkbox handle; subsequent finger movement over other cards adds
+     *  them. We only ADD (not toggle) so a swipe never accidentally
+     *  unselects what it just touched. */
+    onAddToSelection?: (id: number) => void;
     onDrop?: (e: React.DragEvent, folderId: number) => void;
     onDragStart?: (fileId: number) => void;
     onDragEnd?: () => void;
@@ -76,7 +81,7 @@ function useGridColumns(containerRef: React.RefObject<HTMLDivElement | null>) {
 
 export function FileExplorer({
     files, loading, error, viewMode, selectedIds, activeFolderId,
-    onFileClick, onFileDoubleClick, onDelete, onDownload, onPreview, onManualUpload, onSelectionClear, onToggleSelection, onDrop, onDragStart, onDragEnd, disableThumbnailFor,
+    onFileClick, onFileDoubleClick, onDelete, onDownload, onPreview, onManualUpload, onSelectionClear, onToggleSelection, onAddToSelection, onDrop, onDragStart, onDragEnd, disableThumbnailFor,
     sortField, sortDirection, onSortChange
 }: FileExplorerProps) {
     const [typeFilters, setTypeFilters] = useState<Set<ConcreteCategory>>(new Set());
@@ -177,6 +182,127 @@ export function FileExplorer({
         gridVirtualizer.measure();
     }, [rowHeight, gridVirtualizer]);
 
+    // Gallery-style range drag-to-select. Active only in selection mode
+    // (selectedIds.length > 0) so vertical scroll keeps working when the
+    // user isn't picking files. Once a finger is moving on a card, the
+    // range from the touch's *start card* to the *current card* — in
+    // visible (sorted+filtered) order — is added to the selection.
+    //
+    // Refs let us read fresh selectedIds / visibleOrderedIds inside the
+    // listeners without re-binding on every render.
+    const selectedRef = useRef(selectedIds);
+    selectedRef.current = selectedIds;
+    const orderedRef = useRef(visibleOrderedIds);
+    orderedRef.current = visibleOrderedIds;
+    useEffect(() => {
+        if (!onAddToSelection) return;
+        const root = parentRef.current;
+        if (!root) return;
+
+        const state = {
+            active: false,
+            dragging: false,
+            startId: null as number | null,
+            startX: 0,
+            startY: 0,
+            wasDragging: false, // set on touchend, read by the click suppressor
+        };
+
+        const idAtPoint = (x: number, y: number): number | null => {
+            const el = document.elementFromPoint(x, y);
+            if (!el) return null;
+            const card = (el as HTMLElement).closest('[data-file-id]');
+            if (!card) return null;
+            const raw = card.getAttribute('data-file-id');
+            const n = raw ? Number(raw) : NaN;
+            return Number.isFinite(n) ? n : null;
+        };
+
+        const onStart = (e: TouchEvent) => {
+            if (e.touches.length !== 1) {
+                state.active = false;
+                return;
+            }
+            const t = e.touches[0];
+            const id = idAtPoint(t.clientX, t.clientY);
+            if (id === null) { state.active = false; return; }
+            state.active = true;
+            state.dragging = false;
+            state.startId = id;
+            state.startX = t.clientX;
+            state.startY = t.clientY;
+        };
+
+        const onMove = (e: TouchEvent) => {
+            if (!state.active) return;
+            const t = e.touches[0];
+            const dx = t.clientX - state.startX;
+            const dy = t.clientY - state.startY;
+            if (!state.dragging) {
+                if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+                state.dragging = true;
+            }
+            // Only commandeer the gesture (and block scroll) once the user
+            // is in selection mode AND has moved past threshold. Outside
+            // selection mode the swipe is just a scroll — don't interfere.
+            if (selectedRef.current.length === 0) return;
+            e.preventDefault();
+            const currentId = idAtPoint(t.clientX, t.clientY);
+            if (currentId === null || state.startId === null) return;
+            const ordered = orderedRef.current;
+            const a = ordered.indexOf(state.startId);
+            const b = ordered.indexOf(currentId);
+            if (a < 0 || b < 0) return;
+            const lo = Math.min(a, b);
+            const hi = Math.max(a, b);
+            for (let i = lo; i <= hi; i++) onAddToSelection(ordered[i]);
+        };
+
+        const onEnd = (e: TouchEvent) => {
+            if (state.dragging && selectedRef.current.length > 0) {
+                // Prevent the synthetic click that follows a touchend so a
+                // 200px drag-select doesn't also fire onClick on the card
+                // where the finger lifted (which would either open preview
+                // or toggle, both wrong here).
+                e.preventDefault();
+                state.wasDragging = true;
+                // Belt-and-braces: also intercept the next click in capture
+                // phase, since not every iOS version honors touchend's
+                // preventDefault for the trailing click.
+                const blockClick = (ev: Event) => {
+                    ev.stopPropagation();
+                    ev.preventDefault();
+                    document.removeEventListener('click', blockClick, true);
+                };
+                document.addEventListener('click', blockClick, true);
+                window.setTimeout(() => {
+                    document.removeEventListener('click', blockClick, true);
+                    state.wasDragging = false;
+                }, 400);
+            }
+            state.active = false;
+            state.dragging = false;
+            state.startId = null;
+        };
+
+        const onCancel = () => {
+            state.active = false;
+            state.dragging = false;
+            state.startId = null;
+        };
+
+        root.addEventListener('touchstart', onStart, { passive: true });
+        root.addEventListener('touchmove', onMove, { passive: false });
+        root.addEventListener('touchend', onEnd, { passive: false });
+        root.addEventListener('touchcancel', onCancel);
+        return () => {
+            root.removeEventListener('touchstart', onStart);
+            root.removeEventListener('touchmove', onMove);
+            root.removeEventListener('touchend', onEnd);
+            root.removeEventListener('touchcancel', onCancel);
+        };
+    }, [onAddToSelection]);
+
     const listVirtualizer = useVirtualizer({
         count: listItems.length,
         getScrollElement: () => parentRef.current,
@@ -201,7 +327,7 @@ export function FileExplorer({
 
     if (loading) {
         return (
-            <div className="flex-1 p-6 flex justify-center items-center text-telegram-subtext flex-col gap-4">
+            <div className="flex-1 p-3 sm:p-6 flex justify-center items-center text-telegram-subtext flex-col gap-4">
                 <div className="w-8 h-8 border-4 border-telegram-primary border-t-transparent rounded-full animate-spin"></div>
                 Loading your files...
             </div>
@@ -209,12 +335,12 @@ export function FileExplorer({
     }
 
     if (error) {
-        return <div className="flex-1 p-6 flex justify-center items-center text-red-400">Error loading files</div>
+        return <div className="flex-1 p-3 sm:p-6 flex justify-center items-center text-red-400">Error loading files</div>
     }
 
     if (files.length === 0) {
         return (
-            <div className="flex-1 p-6 overflow-auto">
+            <div className="flex-1 p-3 sm:p-6 overflow-auto">
                 <EmptyState onUpload={onManualUpload} />
             </div>
         );
@@ -223,7 +349,7 @@ export function FileExplorer({
     return (
         <div
             ref={parentRef}
-            className="flex-1 p-6 overflow-auto custom-scrollbar"
+            className="flex-1 p-3 sm:p-6 overflow-auto custom-scrollbar"
             onClick={(e) => {
                 if (e.target === e.currentTarget) onSelectionClear();
             }}
@@ -333,7 +459,7 @@ export function FileExplorer({
             ) : (
                 <div className="flex flex-col w-full">
                     {/* List Header */}
-                    <div className="grid grid-cols-[2rem_2fr_6rem_8rem] gap-4 px-4 py-2 text-xs font-semibold text-telegram-subtext border-b border-telegram-border mb-2 select-none items-center">
+                    <div className="grid grid-cols-[2rem_2fr_5rem] sm:grid-cols-[2rem_2fr_6rem_8rem] gap-3 sm:gap-4 px-2 sm:px-4 py-2 text-xs font-semibold text-telegram-subtext border-b border-telegram-border mb-2 select-none items-center">
                         <div className="text-center">#</div>
                         <button onClick={() => handleSort('name')} className="flex items-center gap-1 hover:text-telegram-text transition-colors">
                             Name <SortIcon field="name" />
@@ -341,7 +467,7 @@ export function FileExplorer({
                         <button onClick={() => handleSort('size')} className="flex items-center gap-1 justify-end hover:text-telegram-text transition-colors">
                             Size <SortIcon field="size" />
                         </button>
-                        <button onClick={() => handleSort('date')} className="flex items-center gap-1 justify-end hover:text-telegram-text transition-colors">
+                        <button onClick={() => handleSort('date')} className="hidden sm:flex items-center gap-1 justify-end hover:text-telegram-text transition-colors">
                             Date <SortIcon field="date" />
                         </button>
                     </div>

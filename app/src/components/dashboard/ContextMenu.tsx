@@ -34,19 +34,39 @@ export function ContextMenu({ x, y, file, onClose, onDownload, onDelete, onPrevi
         }
     }, [x, y]);
 
-    // Close on outside click
+    // Close on outside click / right-click / tap-away.
+    //
+    // Listeners are attached synchronously rather than after a setTimeout
+    // because parents commonly pass `onClose` as a fresh inline arrow
+    // every render. That re-runs this effect, and a setTimeout-based
+    // attach gets repeatedly cleared before it fires, leaving the menu
+    // un-dismissable.
+    //
+    // To avoid dismissing on the very event that *opened* the menu (the
+    // initial right-click's `contextmenu` event, or the trailing `click`
+    // a long-press leaves behind on iOS), we ignore any event that
+    // arrives within 100ms of mount.
+    //
+    // touchstart covers iOS taps on non-interactive areas (empty grid
+    // space, page background) where Safari doesn't synthesize a click.
     useEffect(() => {
-        const handleClick = () => onClose();
+        const mountedAt = Date.now();
+        const handleOutside = (e: Event) => {
+            if (Date.now() - mountedAt < 100) return;
+            if (menuRef.current && menuRef.current.contains(e.target as Node)) return;
+            onClose();
+        };
         const handleResize = () => onClose();
-
-        window.addEventListener('click', handleClick);
+        window.addEventListener('click', handleOutside, true);
+        window.addEventListener('contextmenu', handleOutside, true);
+        window.addEventListener('touchstart', handleOutside, { passive: true, capture: true });
         window.addEventListener('resize', handleResize);
-        window.addEventListener('contextmenu', handleClick); // Close if right click elsewhere
 
         return () => {
-            window.removeEventListener('click', handleClick);
+            window.removeEventListener('click', handleOutside, true);
+            window.removeEventListener('contextmenu', handleOutside, true);
+            window.removeEventListener('touchstart', handleOutside, true);
             window.removeEventListener('resize', handleResize);
-            window.removeEventListener('contextmenu', handleClick);
         };
     }, [onClose]);
 

@@ -4,6 +4,7 @@ import { Folder, Eye, Trash2 } from 'lucide-react';
 import { invoke } from '../../lib/transport';
 import { TelegramFile } from '../../types';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { useLongPress } from '../../hooks/useLongPress';
 
 interface FileCardProps {
     file: TelegramFile;
@@ -34,6 +35,16 @@ export function FileCard({ file, onDelete, onDownload, onPreview, isSelected, on
     const [isDragOver, setIsDragOver] = useState(false);
     const [thumbnail, setThumbnail] = useState<string | null>(null);
     const [thumbnailLoading, setThumbnailLoading] = useState(false);
+
+    // Long-press → synthesize a context-menu open at the touch point.
+    // Reuses the existing onContextMenu handler the parent already wired
+    // up for right-click; the ContextMenu component reads clientX/clientY
+    // off the event to position itself.
+    const longPress = useLongPress(({ x, y }) => {
+        if (!onContextMenu) return;
+        const synthetic = { preventDefault: () => {}, stopPropagation: () => {}, clientX: x, clientY: y } as unknown as React.MouseEvent;
+        onContextMenu(synthetic);
+    });
 
     // Lazy load thumbnail for image files
     useEffect(() => {
@@ -71,9 +82,11 @@ export function FileCard({ file, onDelete, onDownload, onPreview, isSelected, on
     return (
         <div
             className="relative select-none"
+            data-file-id={file.id}
             onContextMenu={onContextMenu}
             onClick={onClick}
             onDoubleClick={onDoubleClick}
+            {...longPress}
             onMouseDown={(e) => {
                 // Block the browser's default shift-click "extend text selection"
                 // behaviour. Without this, the user gets the highlighted text
@@ -151,15 +164,23 @@ export function FileCard({ file, onDelete, onDownload, onPreview, isSelected, on
                     </div>
                 )}
 
-                {/* Selection Checkmark */}
+                {/* Selection Checkmark — visible circle is the same size as
+                    before, but on touch the surrounding transparent padding
+                    expands the tap target to ~48px so the user doesn't keep
+                    hitting the card body and triggering preview. */}
                 <div
+                    data-checkbox-handle="true"
                     onClick={(e) => {
                         e.stopPropagation();
                         if (onToggleSelection) onToggleSelection();
                     }}
-                    className={`absolute top-2 left-2 w-5 h-5 rounded-full border flex items-center justify-center transition-all z-10 cursor-pointer ${isSelected ? 'bg-telegram-primary border-telegram-primary' : 'border-white/50 bg-black/30 opacity-0 group-hover:opacity-100'}`}
+                    className={`absolute top-0 left-0 p-3 sm:p-2 z-10 cursor-pointer transition-opacity ${isSelected ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}
+                    style={{ touchAction: 'manipulation' }}
+                    aria-label={isSelected ? 'Deselect' : 'Select'}
                 >
-                    {isSelected && <div className="w-1.5 h-1.5 bg-black rounded-full" />}
+                    <div className={`w-6 h-6 sm:w-5 sm:h-5 rounded-full border flex items-center justify-center ${isSelected ? 'bg-telegram-primary border-telegram-primary' : 'border-white/70 bg-black/40'}`}>
+                        {isSelected && <div className="w-1.5 h-1.5 bg-black rounded-full" />}
+                    </div>
                 </div>
 
                 {/* File info overlay at bottom */}

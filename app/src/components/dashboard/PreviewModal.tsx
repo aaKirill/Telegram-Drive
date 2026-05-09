@@ -5,6 +5,7 @@ import { convertFileSrc } from '../../lib/transport';
 import { toast } from 'sonner';
 import { TelegramFile } from '../../types';
 import { isImageFile } from '../../utils';
+import { useIsMobile } from '../../hooks/useIsMobile';
 
 const PREVIEW_CACHE_TTL_MS = 5 * 60 * 1000;
 const PREVIEW_CACHE_MAX_ITEMS = 8;
@@ -82,6 +83,7 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
     const [reloadNonce, setReloadNonce] = useState(0);
     const [retryCount, setRetryCount] = useState(0);
     const latestRequestRef = useRef(0);
+    const isMobile = useIsMobile();
 
     useEffect(() => {
         setRetryCount(0);
@@ -203,33 +205,66 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [onClose, onNext, onPrev]);
 
+    // Touch swipe → prev/next. Threshold tuned for thumb gestures: 60px is
+    // far enough to avoid scroll-jitter triggers but short enough to feel
+    // responsive. Vertical-dominant motions are ignored so a user scrolling
+    // text inside the modal isn't fighting horizontal nav.
+    const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+    const onTouchStart = (e: React.TouchEvent) => {
+        if (e.touches.length !== 1) { touchStartRef.current = null; return; }
+        touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    };
+    const onTouchEnd = (e: React.TouchEvent) => {
+        const start = touchStartRef.current;
+        touchStartRef.current = null;
+        if (!start) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - start.x;
+        const dy = t.clientY - start.y;
+        if (Math.abs(dx) < 60 || Math.abs(dy) > Math.abs(dx)) return;
+        if (dx > 0) { if (onPrev) onPrev(); } else { if (onNext) onNext(); }
+    };
+
     return (
-        <div className="fixed inset-0 z-[150] bg-black/90 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
-            <div className="relative max-w-5xl w-full max-h-screen flex flex-col items-center justify-center" onClick={e => e.stopPropagation()}>
+        <div
+            className="fixed inset-0 z-[150] bg-black/90 flex items-center justify-center p-2 sm:p-4 backdrop-blur-sm"
+            onClick={onClose}
+            onTouchStart={onTouchStart}
+            onTouchEnd={onTouchEnd}
+        >
+            <div
+                className="relative w-full max-w-5xl max-h-screen flex flex-col items-center justify-center"
+                // On mobile, don't trap clicks in the inner card so a tap
+                // anywhere (including the image itself) reaches the outer
+                // backdrop's `onClick={onClose}`. Each button below
+                // stops propagation individually to keep nav working.
+                onClick={isMobile ? undefined : (e) => e.stopPropagation()}
+            >
                 <button
-                    onClick={onPrev}
-                    className="absolute left-2 top-1/2 -translate-y-1/2 p-2 bg-black/60 hover:bg-black/80 rounded-full transition-colors"
+                    onClick={(e) => { e.stopPropagation(); if (onPrev) onPrev(); }}
+                    className="absolute left-1 sm:left-2 top-1/2 -translate-y-1/2 p-2 bg-black/60 hover:bg-black/80 rounded-full transition-colors z-10"
                     style={{ color: '#ffffff' }}
                     title="Previous (ArrowLeft / J)"
                 >
-                    <ChevronLeft className="w-6 h-6" />
+                    <ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" />
                 </button>
 
                 <button
-                    onClick={onNext}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-black/60 hover:bg-black/80 rounded-full transition-colors"
+                    onClick={(e) => { e.stopPropagation(); if (onNext) onNext(); }}
+                    className="absolute right-1 sm:right-2 top-1/2 -translate-y-1/2 p-2 bg-black/60 hover:bg-black/80 rounded-full transition-colors z-10"
                     style={{ color: '#ffffff' }}
                     title="Next (ArrowRight / L)"
                 >
-                    <ChevronRight className="w-6 h-6" />
+                    <ChevronRight className="w-5 h-5 sm:w-6 sm:h-6" />
                 </button>
 
                 <button
                     onClick={onClose}
-                    className="absolute -top-12 right-0 p-2 bg-black/60 hover:bg-black/80 rounded-full transition-colors"
+                    className="absolute top-2 right-2 sm:-top-12 sm:right-0 p-2 bg-black/60 hover:bg-black/80 rounded-full transition-colors z-10"
                     style={{ color: '#ffffff' }}
+                    aria-label="Close"
                 >
-                    <X className="w-6 h-6" />
+                    <X className="w-5 h-5 sm:w-6 sm:h-6" />
                 </button>
 
                 {loading && (
@@ -274,7 +309,8 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
                                 <p className="text-gray-400 mb-4">Inline preview not supported.</p>
                                 <p className="text-xs text-gray-500 mb-4">File type: {file.name.split('.').pop()}</p>
                                 <button
-                                    onClick={async () => {
+                                    onClick={async (e) => {
+                                        e.stopPropagation();
                                         try {
                                             const path = await invoke<string>('cmd_get_preview', {
                                                 messageId: file.id,
@@ -303,7 +339,7 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
                     </div>
                 )}
 
-                <div className="absolute bottom-[-3rem] text-white text-sm opacity-50">
+                <div className="absolute bottom-2 sm:bottom-[-3rem] left-1/2 -translate-x-1/2 max-w-[90%] truncate text-white text-xs sm:text-sm opacity-70 sm:opacity-50 text-center px-3 py-1 rounded bg-black/40 sm:bg-transparent">
                     {file.name}
                     {typeof currentIndex === 'number' && typeof totalItems === 'number' && totalItems > 0 && (
                         <span className="ml-3">{currentIndex + 1}/{totalItems}</span>
