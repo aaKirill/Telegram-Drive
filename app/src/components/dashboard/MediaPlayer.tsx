@@ -110,31 +110,35 @@ export function MediaPlayer({ file, onClose, onNext, onPrev, currentIndex, total
     if (isMobile) {
         return (
             <div className="fixed inset-0 z-[200] bg-black/95 flex flex-col items-stretch backdrop-blur-md animate-in fade-in duration-200">
-                {/* Top chrome — Close + name + counter sit ABOVE the video
-                    instead of floating on top of it (which the previous
-                    `-top-12` placement did, leaving the X half off-screen
-                    on iOS Safari). */}
+                {/* Top chrome — outer wrapper owns the safe-area-inset-top
+                    padding; the inner row keeps a fixed h-12 so the X tap
+                    target stays full-size below the iOS status bar. The
+                    previous combined element collapsed the row to a few
+                    pixels on iOS PWA, making the close button untappable. */}
                 <div
-                    className="flex items-center gap-2 px-3 h-12 bg-black/60 border-b border-white/10 safe-top shrink-0"
+                    className="bg-black/60 border-b border-white/10 shrink-0"
+                    style={{ paddingTop: 'env(safe-area-inset-top)' }}
                     onClick={(e) => e.stopPropagation()}
                 >
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        className="p-2 -ml-2 rounded-md text-white/80 hover:text-white active:bg-white/10 transition"
-                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
-                        aria-label="Close"
-                    >
-                        <X className="w-5 h-5" />
-                    </button>
-                    <div className="flex-1 min-w-0 text-white text-sm truncate" title={file.name}>
-                        {file.name}
-                    </div>
-                    {typeof currentIndex === 'number' && typeof totalItems === 'number' && totalItems > 0 && (
-                        <div className="text-white/60 text-xs shrink-0 tabular-nums">
-                            {currentIndex + 1}/{totalItems}
+                    <div className="flex items-center gap-2 px-3 h-12">
+                        <div className="flex-1 min-w-0 text-white text-sm truncate" title={file.name}>
+                            {file.name}
                         </div>
-                    )}
+                        {typeof currentIndex === 'number' && typeof totalItems === 'number' && totalItems > 0 && (
+                            <div className="text-white/60 text-xs shrink-0 tabular-nums">
+                                {currentIndex + 1}/{totalItems}
+                            </div>
+                        )}
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="p-2 -mr-1 rounded-md text-white/80 hover:text-white active:bg-white/10 transition shrink-0"
+                            style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                            aria-label="Close"
+                        >
+                            <X className="w-5 h-5" />
+                        </button>
+                    </div>
                 </div>
 
                 <div className="relative flex-1 flex items-center justify-center" onClick={onClose}>

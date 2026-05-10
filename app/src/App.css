@@ -31,6 +31,17 @@
   --color-telegram-hover: rgba(0, 0, 0, 0.025);
 }
 
+html {
+  /* Paint the html element to the same color as the app so the iOS
+     overscroll / safe-area-inset-bottom strip doesn't reveal a default
+     grey "rubber band" behind the app. Without this, dragging up on
+     mobile shows a thin grey band at the bottom edge of the screen. */
+  background: var(--color-telegram-bg);
+  /* Disable rubber-band overscroll on the page itself; scroll containers
+     inside still bounce normally. */
+  overscroll-behavior: none;
+}
+
 body,
 #root {
   margin: 0;

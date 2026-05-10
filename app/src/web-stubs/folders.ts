@@ -142,7 +142,7 @@ export async function createFolder(name: string): Promise<TelegramFolder> {
  *      gramjs caches accessHashes for every channel the account knows
  *      about, then retries.
  */
-async function resolveChannelInput(c: Awaited<ReturnType<typeof ensureClient>>, folderId: number): Promise<Api.InputPeerChannel> {
+export async function resolveChannelInput(c: Awaited<ReturnType<typeof ensureClient>>, folderId: number): Promise<Api.InputPeerChannel> {
   const peer = new Api.PeerChannel({ channelId: bigInt(folderId) });
   let entity;
   try {

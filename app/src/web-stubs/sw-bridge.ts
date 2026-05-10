@@ -10,6 +10,7 @@
 import { Api } from "telegram";
 import bigInt from "big-integer";
 import { ensureClient } from "./client";
+import { resolveChannelInput } from "./folders";
 
 const REQUEST_SIZE = 64 * 1024;
 
@@ -45,8 +46,13 @@ async function handleStreamRequest(
   try {
     const c = await ensureClient();
     // null folderId = Saved Messages — gramjs's "me" sentinel resolves
-    // to the self peer.
-    const entity = folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
+    // to the self peer. For [TD] channels, use the explicit
+    // PeerChannel + iterDialogs-fallback resolver: a fresh PWA load
+    // hasn't populated gramjs's entity cache, and `getInputEntity` of a
+    // raw positive number defaults to a user lookup — that was making
+    // mobile video previews silently fail to load on first open.
+    const entity: "me" | Api.InputPeerChannel =
+        folderId == null ? "me" : await resolveChannelInput(c, folderId);
     const messages = await c.getMessages(entity, { ids: [messageId] });
     const msg = messages[0];
     if (!msg || !msg.media) {

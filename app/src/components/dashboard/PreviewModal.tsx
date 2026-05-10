@@ -268,30 +268,36 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
             onTouchStart={isMobile ? undefined : onTouchStart}
             onTouchEnd={isMobile ? undefined : onTouchEnd}
         >
-            {/* Mobile chrome strip — sits above the image so the filename
-                and close button never sit on top of the image content. */}
+            {/* Mobile chrome strip — outer wrapper owns the
+                safe-area-inset-top padding; the inner row keeps a fixed
+                h-12 so the close button stays full-size below the iOS
+                status bar. Close button on the RIGHT (consistent with
+                iOS / standard close-button conventions). */}
             {isMobile && (
                 <div
-                    className="flex items-center gap-2 px-3 h-12 bg-black/60 border-b border-white/10 safe-top shrink-0"
+                    className="bg-black/60 border-b border-white/10 shrink-0"
+                    style={{ paddingTop: 'env(safe-area-inset-top)' }}
                     onClick={(e) => e.stopPropagation()}
                 >
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        className="p-2 -ml-2 rounded-md text-white/80 hover:text-white active:bg-white/10 transition"
-                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
-                        aria-label="Close"
-                    >
-                        <X className="w-5 h-5" />
-                    </button>
-                    <div className="flex-1 min-w-0 text-white text-sm truncate" title={file.name}>
-                        {file.name}
-                    </div>
-                    {typeof currentIndex === 'number' && typeof totalItems === 'number' && totalItems > 0 && (
-                        <div className="text-white/60 text-xs shrink-0 tabular-nums">
-                            {currentIndex + 1}/{totalItems}
+                    <div className="flex items-center gap-2 px-3 h-12">
+                        <div className="flex-1 min-w-0 text-white text-sm truncate" title={file.name}>
+                            {file.name}
                         </div>
-                    )}
+                        {typeof currentIndex === 'number' && typeof totalItems === 'number' && totalItems > 0 && (
+                            <div className="text-white/60 text-xs shrink-0 tabular-nums">
+                                {currentIndex + 1}/{totalItems}
+                            </div>
+                        )}
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="p-2 -mr-1 rounded-md text-white/80 hover:text-white active:bg-white/10 transition shrink-0"
+                            style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                            aria-label="Close"
+                        >
+                            <X className="w-5 h-5" />
+                        </button>
+                    </div>
                 </div>
             )}
 
