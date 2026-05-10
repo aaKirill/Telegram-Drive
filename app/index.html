@@ -10,7 +10,11 @@
   <link rel="apple-touch-icon" href="logo.png" />
   <link rel="manifest" href="manifest.webmanifest" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#0a0a0a" />
+  <!-- Must match `--color-telegram-bg` in App.css. iOS PWA paints
+       safe-area-inset-bottom (the home-indicator strip) in this color
+       when the body itself doesn't extend past the visible viewport,
+       so a mismatch reads as a grey band at the bottom of the screen. -->
+  <meta name="theme-color" content="#11161e" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Telegram Drive" />

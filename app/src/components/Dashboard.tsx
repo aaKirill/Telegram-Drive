@@ -692,7 +692,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
             />
 
             <main
-                className="flex-1 flex flex-col min-w-0"
+                className="flex-1 flex flex-col min-w-0 bg-telegram-bg"
                 style={
                     isMobile && selectedIds.length > 0
                         ? { paddingBottom: `calc(3.5rem + env(safe-area-inset-bottom))` }

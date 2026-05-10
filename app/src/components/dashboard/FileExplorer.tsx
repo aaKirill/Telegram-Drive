@@ -423,7 +423,7 @@ export function FileExplorer({
     return (
         <div
             ref={parentRef}
-            className="flex-1 overflow-auto custom-scrollbar p-0 sm:p-6"
+            className="flex-1 overflow-auto custom-scrollbar p-0 sm:p-6 bg-telegram-bg"
             data-select-mode={selectMode ? 'on' : 'off'}
             onClick={(e) => {
                 if (e.target === e.currentTarget) onSelectionClear();
