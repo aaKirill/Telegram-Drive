@@ -33,6 +33,7 @@ interface MediaPlayerProps {
 
 export function MediaPlayer({ file, onClose, onNext, onPrev, currentIndex, totalItems, activeFolderId }: MediaPlayerProps) {
     const [streamUrl, setStreamUrl] = useState<string | null>(null);
+    const [streamError, setStreamError] = useState<string | null>(null);
     const [poster, setPoster] = useState<string | null>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const audioRef = useRef<HTMLAudioElement>(null);
@@ -46,9 +47,15 @@ export function MediaPlayer({ file, onClose, onNext, onPrev, currentIndex, total
     useEffect(() => {
         let cancelled = false;
         setStreamUrl(null);
+        setStreamError(null);
         resolveMediaUrl(fileFolderId, file.id).then((url) => {
             if (!cancelled) setStreamUrl(url);
-        }).catch(() => {});
+        }).catch((e) => {
+            if (cancelled) return;
+            const msg = e instanceof Error ? e.message : String(e);
+            console.warn("[mediaplayer] resolveMediaUrl failed:", msg);
+            setStreamError(msg || "Could not prepare media stream");
+        });
         return () => { cancelled = true; };
     }, [file.id, fileFolderId]);
 
@@ -165,7 +172,12 @@ export function MediaPlayer({ file, onClose, onNext, onPrev, currentIndex, total
                         </button>
                     )}
                     <div className="w-full h-full flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
-                        {!streamUrl ? (
+                        {streamError ? (
+                            <div className="text-red-400 bg-white/10 p-4 rounded-lg border border-red-500/20 max-w-sm mx-4">
+                                <p className="font-bold text-sm">Could not load video</p>
+                                <p className="text-xs mt-1 opacity-80">{streamError}</p>
+                            </div>
+                        ) : !streamUrl ? (
                             <div className="flex flex-col items-center gap-4 text-white">
                                 <div className="w-10 h-10 border-4 border-telegram-primary border-t-transparent rounded-full animate-spin"></div>
                                 <p>Preparing stream...</p>
@@ -179,6 +191,12 @@ export function MediaPlayer({ file, onClose, onNext, onPrev, currentIndex, total
                                 autoPlay
                                 playsInline
                                 className="max-w-full max-h-full object-contain"
+                                onError={() => {
+                                    const ve = videoRef.current?.error;
+                                    const code = ve?.code;
+                                    const message = ve?.message ?? "playback failed";
+                                    setStreamError(`${message}${code ? ` (code ${code})` : ''}`);
+                                }}
                             />
                         ) : isAudio ? (
                             <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-telegram-primary/20 to-black px-6">

@@ -197,7 +197,7 @@ function AppContent() {
     };
 
     return (
-        <main className="h-screen w-screen text-telegram-text overflow-hidden selection:bg-telegram-primary/30 relative">
+        <main className="h-dvh w-screen text-telegram-text overflow-hidden selection:bg-telegram-primary/30 relative">
             <UpdateBanner
                 available={available}
                 version={version}
