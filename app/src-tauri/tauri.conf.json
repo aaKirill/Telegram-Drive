@@ -9,7 +9,7 @@
     }
   },
   "productName": "Telegram Drive",
-  "version": "2.1.9",
+  "version": "2.1.10",
   "identifier": "com.cameronamer.telegramdrive",
   "build": {
     "beforeDevCommand": "npm run dev",

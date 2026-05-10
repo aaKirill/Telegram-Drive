@@ -197,7 +197,10 @@ function AppContent() {
     };
 
     return (
-        <main className="h-dvh w-screen text-telegram-text overflow-hidden selection:bg-telegram-primary/30 relative">
+        <main
+            className="w-screen text-telegram-text overflow-hidden selection:bg-telegram-primary/30 relative"
+            style={{ height: '100dvh' }}
+        >
             <UpdateBanner
                 available={available}
                 version={version}

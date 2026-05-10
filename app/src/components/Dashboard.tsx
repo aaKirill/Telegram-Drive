@@ -573,7 +573,10 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
     return (
         <div
-            className="flex h-dvh w-full overflow-hidden bg-telegram-bg relative"
+            className="flex w-full overflow-hidden bg-telegram-bg relative"
+            // 100dvh inline so the layout follows the visible viewport on iOS
+            // even if Tailwind's h-dvh utility was purged from the build.
+            style={{ height: '100dvh' }}
             onClick={() => setSelectedIds([])}
             onDragOver={handleRootDragOver}
             onDragEnter={handleRootDragEnter}
