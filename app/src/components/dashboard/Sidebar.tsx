@@ -209,7 +209,14 @@ export function Sidebar({
                 />
             )}
             <aside className={asideClass} onClick={e => e.stopPropagation()}>
-            <div className="p-4 flex items-center gap-2">
+            <div
+                className="p-4 flex items-center gap-2"
+                // The mobile sidebar drawer renders edge-to-edge, so the
+                // logo row needs the iOS status-bar inset baked into its
+                // top padding too — otherwise the clock overlays the
+                // "Telegram Drive" title.
+                style={isMobile ? { paddingTop: 'calc(1rem + env(safe-area-inset-top))' } : undefined}
+            >
                 <img
                     src={`${import.meta.env.BASE_URL}logo-transparent.png`}
                     className="w-8 h-8 drop-shadow-lg"

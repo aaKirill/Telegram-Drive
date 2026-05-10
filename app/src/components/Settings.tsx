@@ -221,11 +221,16 @@ export function Settings({ onClose, folders, bandwidth, locks }: SettingsProps) 
 
     return (
         <div className="h-full w-full overflow-y-auto bg-telegram-bg">
-            <header className="sticky top-0 z-10 bg-telegram-surface/95 backdrop-blur-md border-b border-telegram-border px-6 py-3 flex items-center gap-3">
-                <button onClick={onClose} className="p-1.5 hover:bg-telegram-hover rounded-md text-telegram-subtext hover:text-telegram-text transition" title="Back">
-                    <ArrowLeft className="w-5 h-5" />
-                </button>
-                <h1 className="text-lg font-semibold text-telegram-text">Settings</h1>
+            <header
+                className="sticky top-0 z-10 bg-telegram-surface/95 backdrop-blur-md border-b border-telegram-border"
+                style={{ paddingTop: 'env(safe-area-inset-top)' }}
+            >
+                <div className="px-6 py-3 flex items-center gap-3">
+                    <button onClick={onClose} className="p-1.5 hover:bg-telegram-hover rounded-md text-telegram-subtext hover:text-telegram-text transition" title="Back">
+                        <ArrowLeft className="w-5 h-5" />
+                    </button>
+                    <h1 className="text-lg font-semibold text-telegram-text">Settings</h1>
+                </div>
             </header>
 
             <div className="max-w-2xl mx-auto px-6 py-6">

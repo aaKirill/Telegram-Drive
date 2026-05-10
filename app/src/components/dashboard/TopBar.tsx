@@ -102,8 +102,18 @@ export function TopBar({
     // input + close button so the user gets an unambiguous "search" surface
     // when there's no room for an inline input next to everything else.
     if (isMobile && searchOpen) {
+        // Padding-top via inline style is on the OUTER header so the
+        // status-bar reserve sits above the h-14 content row instead of
+        // squeezing it (Tailwind's `h-14` is border-box, so adding
+        // `safe-top` padding to the same element collapsed the row to a
+        // few pixels and clipped icons under iOS's clock/battery overlay).
         return (
-            <header className="border-b border-telegram-border flex items-center px-2 gap-2 bg-telegram-surface/95 backdrop-blur-md sticky top-0 z-10 h-14 safe-top" onClick={e => e.stopPropagation()}>
+            <header
+                className="border-b border-telegram-border bg-telegram-surface/95 backdrop-blur-md sticky top-0 z-10"
+                style={{ paddingTop: 'env(safe-area-inset-top)' }}
+                onClick={e => e.stopPropagation()}
+            >
+                <div className="flex items-center px-2 gap-2 h-14">
                 <Search className="w-5 h-5 text-telegram-subtext shrink-0" />
                 <input
                     ref={searchInputRef}
@@ -125,12 +135,18 @@ export function TopBar({
                 >
                     <X className="w-5 h-5" />
                 </button>
+                </div>
             </header>
         );
     }
 
     return (
-        <header className="border-b border-telegram-border flex items-center px-2 sm:px-4 justify-between bg-telegram-surface/80 backdrop-blur-md sticky top-0 z-10 h-14 md:h-14 safe-top" onClick={e => e.stopPropagation()}>
+        <header
+            className="border-b border-telegram-border bg-telegram-surface/80 backdrop-blur-md sticky top-0 z-10"
+            style={{ paddingTop: 'env(safe-area-inset-top)' }}
+            onClick={e => e.stopPropagation()}
+        >
+            <div className="flex items-center px-2 sm:px-4 justify-between h-14">
             <div className="flex items-center gap-1 sm:gap-2 min-w-0">
                 {isMobile && (
                     <button
@@ -404,6 +420,7 @@ export function TopBar({
                         )}
                     </div>
                 )}
+            </div>
             </div>
         </header>
     )

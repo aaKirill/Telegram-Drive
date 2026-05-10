@@ -128,12 +128,46 @@ export async function createFolder(name: string): Promise<TelegramFolder> {
   return { id: asNumber(channel.id), name, parent_id: null };
 }
 
-export async function deleteFolder(folderId: number): Promise<boolean> {
-  const c = await ensureClient();
-  const entity = await c.getInputEntity(bigInt(folderId));
+/**
+ * Resolve a [TD] folder id (positive raw channel id, the way we store it
+ * locally) to an `InputPeerChannel`. gramjs's `getInputEntity(rawNumber)`
+ * defaults to interpreting positive numbers as user ids, so on a fresh
+ * page-load — before iterDialogs has populated the entity cache — calls
+ * like `deleteFolder` raise `Could not find the input entity for
+ * {userId, PeerUser}`. This helper:
+ *
+ *   1. asks gramjs explicitly for an `Api.PeerChannel`, which bypasses the
+ *      user-first heuristic;
+ *   2. on cache miss, runs `iterDialogs` (both inbox + archive) once so
+ *      gramjs caches accessHashes for every channel the account knows
+ *      about, then retries.
+ */
+async function resolveChannelInput(c: Awaited<ReturnType<typeof ensureClient>>, folderId: number): Promise<Api.InputPeerChannel> {
+  const peer = new Api.PeerChannel({ channelId: bigInt(folderId) });
+  let entity;
+  try {
+    entity = await c.getInputEntity(peer);
+  } catch {
+    // Force-populate the entity cache. iterDialogs is the cheapest known
+    // way to make gramjs commit accessHashes for every visible channel
+    // into its session storage.
+    try {
+      for await (const _ of c.iterDialogs({ limit: 200 })) { void _; }
+    } catch { /* non-fatal */ }
+    try {
+      for await (const _ of c.iterDialogs({ archived: true, limit: 200 })) { void _; }
+    } catch { /* non-fatal */ }
+    entity = await c.getInputEntity(peer);
+  }
   if (!(entity instanceof Api.InputPeerChannel)) {
     throw new Error("Folder is not a channel");
   }
+  return entity;
+}
+
+export async function deleteFolder(folderId: number): Promise<boolean> {
+  const c = await ensureClient();
+  const entity = await resolveChannelInput(c, folderId);
   await c.invoke(
     new Api.channels.DeleteChannel({
       channel: new Api.InputChannel({ channelId: entity.channelId, accessHash: entity.accessHash }),
@@ -155,8 +189,8 @@ export async function getFiles(folderId: number | null): Promise<FileMetadata[]>
   // Saved Messages = the user's chat with themselves. gramjs accepts the
   // "me" sentinel and resolves to the self peer. For [TD] folders we
   // resolve the channel by id like before.
-  const target: "me" | Awaited<ReturnType<typeof c.getInputEntity>> =
-    folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
+  const target: "me" | Api.InputPeerChannel =
+    folderId == null ? "me" : await resolveChannelInput(c, folderId);
   // Server-side filtered walks: one filter per media class. Telegram's
   // InputMessagesFilterDocument only catches "file" docs — audio, voice,
   // and gifs are separate filters, and missing them dropped the audio /
@@ -246,7 +280,8 @@ export async function deleteFile(messageId: number, folderId: number | null): Pr
   // For Saved Messages (folderId null), pass "me" so gramjs resolves to
   // the self peer. Passing undefined here makes deleteMessages do a
   // global "find this message anywhere" which is wrong.
-  const entity = folderId == null ? "me" : await c.getInputEntity(bigInt(folderId));
+  const entity: "me" | Api.InputPeerChannel =
+    folderId == null ? "me" : await resolveChannelInput(c, folderId);
   await c.deleteMessages(entity, [messageId], { revoke: true });
   return true;
 }
@@ -260,8 +295,10 @@ export async function moveFiles(
   const c = await ensureClient();
   // null folderId == Saved Messages — gramjs resolves "me" to the self
   // peer, same shape forwardMessages / deleteMessages accept.
-  const src = sourceFolderId == null ? "me" : await c.getInputEntity(bigInt(sourceFolderId));
-  const dst = targetFolderId == null ? "me" : await c.getInputEntity(bigInt(targetFolderId));
+  const src: "me" | Api.InputPeerChannel =
+    sourceFolderId == null ? "me" : await resolveChannelInput(c, sourceFolderId);
+  const dst: "me" | Api.InputPeerChannel =
+    targetFolderId == null ? "me" : await resolveChannelInput(c, targetFolderId);
   // forwardMessages returns the freshly-created Message objects in the
   // destination peer. We map them to FileMetadata so the frontend can
   // optimistic-insert into the target folder cache without waiting on

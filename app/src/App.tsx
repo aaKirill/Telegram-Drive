@@ -170,11 +170,25 @@ function AppContent() {
     };
 
     /** Called by AuthWizard on successful login. Telegram session is now
-     *  fresh on disk — but per the user's spec, every user must have a
-     *  local passcode, so we route through the mandatory setup screen
-     *  before showing the Dashboard. */
-    const handleLoggedIn = () => {
-        setAuthState("passcode_setup");
+     *  fresh on disk. If a passcode was already configured (e.g. the
+     *  user came through LockScreen → unlock-succeeded → ping-failed
+     *  → AuthWizard), we MUST NOT route to PasscodeSetup — it would
+     *  call cmd_passcode_set and the backend correctly rejects
+     *  overwriting an existing passcode.json with "Passcode already
+     *  set". The existing passcode just continues to apply to the
+     *  fresh session; it'll be sealed on app exit by the same exit
+     *  handler that always runs. */
+    const handleLoggedIn = async () => {
+        try {
+            const status = await invoke<PasscodeStatus>("cmd_passcode_status");
+            if (status === "disabled") {
+                setAuthState("passcode_setup");
+            } else {
+                setAuthState("authenticated");
+            }
+        } catch {
+            setAuthState("passcode_setup");
+        }
     };
 
     /** Called by PasscodeSetup once cmd_passcode_set has succeeded. */
