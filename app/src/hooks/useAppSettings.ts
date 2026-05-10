@@ -3,9 +3,9 @@ import { Store, load } from '@tauri-apps/plugin-store';
 
 const STORE_FILE = 'app-settings.json';
 
-export type ViewMode = 'grid' | 'list';
-export type SortField = 'name' | 'size' | 'date';
-export type SortDir = 'asc' | 'desc';
+type ViewMode = 'grid' | 'list';
+type SortField = 'name' | 'size' | 'date';
+type SortDir = 'asc' | 'desc';
 
 export interface AppSettings {
     autoLockMinutes: number | null;       // null = off
@@ -16,6 +16,10 @@ export interface AppSettings {
     downloadPath: string | null;          // null = ask each time
     hideThumbnailsGlobal: boolean;
     hideThumbnailsForNewFolders: boolean;
+    /** When enabled, newly created [TD] folders are moved to Telegram's
+     *  archive immediately so they don't clutter the inbox dialog list.
+     *  Default on. */
+    archiveNewFolders: boolean;
     /** When enabled, 10 consecutive wrong folder password attempts wipe that
      *  folder; 10 wrong app-passcode attempts wipe everything. Default off. */
     killswitchEnabled: boolean;
@@ -38,6 +42,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     downloadPath: null,
     hideThumbnailsGlobal: false,
     hideThumbnailsForNewFolders: false,
+    archiveNewFolders: true,
     killswitchEnabled: false,
     syncFolderId: null,
     gridColumnsDesktop: 6,
@@ -72,32 +77,30 @@ function init(): Promise<void> {
     return _initPromise;
 }
 
-// Timestamp of the last local syncFolderId change. Used by lib/sync.ts to
-// reject stale `syncFolderId` values pushed by a remote whose ts is older —
-// without this, switching the sync folder back to a previously-used one
-// snaps right back: the redirect snapshot we wrote at the destination
-// during the prior migration still has settings.syncFolderId=<other>, and
-// LWW-replacing the local settings on apply reverts the user's choice.
-const SYNC_FOLDER_LOCAL_TS_KEY = "_sync_folder_id_local_ts";
-function getSyncFolderIdLocalTs(): number {
-    if (typeof localStorage === "undefined") return 0;
-    return Number(localStorage.getItem(SYNC_FOLDER_LOCAL_TS_KEY) ?? 0) || 0;
-}
-function recordSyncFolderIdLocalTs(): void {
-    if (typeof localStorage === "undefined") return;
-    localStorage.setItem(SYNC_FOLDER_LOCAL_TS_KEY, String(Date.now()));
-}
-export { getSyncFolderIdLocalTs };
-
-export async function updateAppSettingValue<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
+async function updateAppSettingValue<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
+    const prevValue = _settings[key];
     _settings = { ..._settings, [key]: value };
     notify();
     if (!_store) _store = await load(STORE_FILE);
     await _store.set(key, value as any);
     await _store.save();
-    if (key === "syncFolderId") recordSyncFolderIdLocalTs();
-    // Lazy import keeps the sync module out of the cold-start path.
-    import('../lib/sync').then(m => m.markDirty()).catch(() => { });
+    // syncFolderId is per-device (PER_DEVICE_SETTINGS in lib/sync.ts) so we
+    // intentionally don't markDirty for it — pushing the local value would
+    // be filtered out anyway and risks confusing the LWW timestamp on
+    // unrelated changes. Instead, purge the stale td-sync.json document
+    // from the location we just left so abandoned snapshots don't pile up
+    // (Saved → 123 → Saved would otherwise leave junk in 123 forever).
+    if (key === "syncFolderId" && prevValue !== value) {
+        try {
+            const { invoke } = await import("../lib/transport");
+            await invoke("cmd_sync_purge", { folderId: prevValue });
+        } catch (e) {
+            console.warn("[td] sync purge of previous folder failed:", e);
+        }
+    } else if (key !== "syncFolderId") {
+        // Lazy import keeps the sync module out of the cold-start path.
+        import('../lib/sync').then(m => m.markDirty()).catch(() => { });
+    }
 }
 
 export function getCurrentSettings(): AppSettings {

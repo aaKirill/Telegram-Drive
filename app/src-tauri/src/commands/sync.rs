@@ -331,19 +331,34 @@ pub async fn cmd_import_folder_locks(
     state: State<'_, super::locks::LockState>,
 ) -> Result<(), String> {
     let store = app.store(LOCK_STORE_FILE).map_err(|e| e.to_string())?;
-    // Replace the existing lock map wholesale (LWW).
-    for key in store.keys() {
-        store.delete(&key);
-    }
+    // MERGE-ADD ONLY — never delete existing entries from a sync apply.
+    // Locks are user-set credentials; once set on any device they must
+    // persist globally until the user explicitly removes them per-device
+    // (cmd_remove_lock). The previous wholesale-replace path zeroed every
+    // device's locks when a freshly-wiped device pushed an empty snapshot.
+    // Trade-off: a "remove password" action doesn't propagate — the user
+    // must remove on each device that has the lock. That's the intended
+    // contract for global, sticky locks.
+    let mut wrote = 0u32;
     for (key, phc) in locks {
-        if phc.starts_with("$argon2") {
-            store.set(&key, serde_json::Value::String(phc));
+        if !phc.starts_with("$argon2") {
+            continue;
         }
+        // Don't overwrite an existing PHC with a different one — the
+        // local entry is just as authoritative as the incoming one for
+        // a credential the user already has. Same key → same secret.
+        if store.has(&key) {
+            continue;
+        }
+        store.set(&key, serde_json::Value::String(phc));
+        wrote += 1;
     }
-    store.save().map_err(|e| e.to_string())?;
-    // Verifier map changed — drop any cached unlock decisions so the user
-    // re-enters the (possibly different) password on the next access.
-    state.unlocked.write().await.clear();
+    if wrote > 0 {
+        store.save().map_err(|e| e.to_string())?;
+        // New verifiers landed — clear cached unlock decisions for those
+        // folders so the user re-enters the password.
+        state.unlocked.write().await.clear();
+    }
     Ok(())
 }
 
@@ -370,6 +385,11 @@ pub async fn cmd_import_lock_attempts(
     app: AppHandle,
 ) -> Result<(), String> {
     let store = app.store(ATTEMPTS_FILE).map_err(|e| e.to_string())?;
+    // Same guard as cmd_import_folder_locks: don't let an empty incoming
+    // map zero an existing attempts store.
+    if attempts.is_empty() && !store.keys().is_empty() {
+        return Ok(());
+    }
     // Replace wholesale — the snapshot is the authoritative state.
     for key in store.keys() {
         store.delete(&key);

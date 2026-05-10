@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::Mutex;
 use grammers_client::{Client};
 use grammers_client::types::{LoginToken, PasswordToken, Peer};
@@ -43,6 +43,11 @@ pub struct TelegramState {
     /// this, orphan walks from prior sessions stack and serialize behind
     /// each other on reload.
     pub generation: Arc<AtomicU64>,
+    /// Transfer ids the user has cancelled. Insert here from cmd_cancel_transfer;
+    /// the upload progress task and the download chunk loop both poll this set
+    /// and abort early. Entries are removed by the cancelled command path itself
+    /// once the in-flight transfer notices and returns "Transfer cancelled".
+    pub cancelled_transfers: Arc<tokio::sync::RwLock<HashSet<String>>>,
 }
 
 pub mod auth;

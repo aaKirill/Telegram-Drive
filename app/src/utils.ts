@@ -26,7 +26,7 @@ export const isVideoFile    = (name: string) => endsWithAny(name, VIDEO_EXTENSIO
 export const isAudioFile    = (name: string) => endsWithAny(name, AUDIO_EXTENSIONS);
 export const isImageFile    = (name: string) => endsWithAny(name, IMAGE_EXTENSIONS);
 export const isPdfFile      = (name: string) => name.toLowerCase().endsWith('.pdf');
-export const isDocumentFile = (name: string) => endsWithAny(name, DOCUMENT_EXTENSIONS);
+const isDocumentFile = (name: string) => endsWithAny(name, DOCUMENT_EXTENSIONS);
 
 export type FileTypeCategory = 'all' | 'image' | 'video' | 'audio' | 'document' | 'other';
 

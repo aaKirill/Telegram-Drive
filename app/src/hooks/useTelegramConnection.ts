@@ -258,10 +258,10 @@ export function useTelegramConnection(onLogoutParent: () => void) {
         }
     };
 
-    const handleCreateFolder = async (name: string): Promise<TelegramFolder | null> => {
+    const handleCreateFolder = async (name: string, archive: boolean): Promise<TelegramFolder | null> => {
         if (!store) return null;
         try {
-            const newFolder = await invoke<TelegramFolder>('cmd_create_folder', { name });
+            const newFolder = await invoke<TelegramFolder>('cmd_create_folder', { name, archive });
             const updated = [...folders, newFolder];
             setFolders(updated);
             await store.set('folders', updated);

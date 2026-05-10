@@ -234,24 +234,59 @@ export async function uploadFile(
     new Api.DocumentAttributeFilename({ fileName: file.name }),
   ];
   if (videoAttr) attributes.push(videoAttr);
+  // Throttled emit: gramjs fires progressCallback per chunk (~hundreds of
+  // times for big uploads), so we cap to ~250ms ticks and derive speed
+  // from bytes-since-last-emit / dt — matches the Tauri ticker cadence.
+  let lastEmitMs = 0;
+  let lastEmitBytes = 0;
+  emitWebEvent("upload-progress", {
+    id: transferId, percent: 0, uploaded_bytes: 0, total_bytes: file.size, speed_bytes_per_sec: 0,
+  });
+  const onUploadProgress = (p: number) => {
+    // Throwing inside the progress callback bubbles up from uploadFile and
+    // stops further chunk uploads. Telegram's CDN garbage-collects partial
+    // uploads automatically; nothing leaks server-side. The "Transfer
+    // cancelled" wording matches the Tauri side so the hook-layer check
+    // distinguishes a user-cancel from a real error.
+    if (isCancelled(transferId)) throw new Error("Transfer cancelled");
+    const frac = typeof p === "number" ? Math.max(0, Math.min(1, p)) : 0;
+    const uploaded = Math.floor(frac * file.size);
+    const now = Date.now();
+    const dt = (now - lastEmitMs) / 1000;
+    if (lastEmitMs !== 0 && dt < 0.25) return;
+    const speed = dt > 0 ? Math.max(0, Math.floor((uploaded - lastEmitBytes) / dt)) : 0;
+    const pct = Math.min(99, Math.floor(frac * 100));
+    emitWebEvent("upload-progress", {
+      id: transferId, percent: pct, uploaded_bytes: uploaded, total_bytes: file.size, speed_bytes_per_sec: speed,
+    });
+    lastEmitMs = now;
+    lastEmitBytes = uploaded;
+  };
   try {
-    const sent = await c.sendFile(entity, {
+    // Upload the main file ourselves with a bumped maxBufferSize. gramjs's
+    // sendFile defers to uploadFile but doesn't expose the maxBufferSize
+    // knob, and uploadFile's getFileBuffer routes any file >20MB through
+    // CustomFile.path — which is `""` here because we have no filesystem
+    // (PWA). Forcing the buffer branch via Number.MAX_SAFE_INTEGER works
+    // because the bytes are already loaded in memory anyway. Then hand
+    // the resulting InputFile handle to sendFile, which short-circuits
+    // re-upload when it sees an InputFile and just builds the media +
+    // SendMedia call.
+    const fileHandle = await c.uploadFile({
       file: customFile,
+      workers: 1,
+      maxBufferSize: Number.MAX_SAFE_INTEGER,
+      onProgress: onUploadProgress,
+    });
+    const sent = await c.sendFile(entity, {
+      file: fileHandle,
       forceDocument: true,
       thumb: thumb ?? undefined,
       attributes,
-      progressCallback: (p) => {
-        // Throwing inside the progress callback bubbles up from sendFile
-        // and stops further chunk uploads. Telegram's CDN garbage-collects
-        // partial uploads automatically; nothing leaks server-side.
-        if (isCancelled(transferId)) throw new Error("Cancelled");
-        const pct = typeof p === "number"
-          ? Math.max(0, Math.min(100, Math.floor(p * 100)))
-          : 0;
-        emitWebEvent("upload-progress", { id: transferId, percent: pct });
-      },
     });
-    emitWebEvent("upload-progress", { id: transferId, percent: 100 });
+    emitWebEvent("upload-progress", {
+      id: transferId, percent: 100, uploaded_bytes: file.size, total_bytes: file.size, speed_bytes_per_sec: 0,
+    });
     recordUpload(file.size);
 
     // Optimistic insert: build FileMetadata immediately so the frontend
@@ -311,6 +346,11 @@ export async function downloadFile(
     if (msg.media instanceof Api.MessageMediaDocument && msg.media.document instanceof Api.Document) {
       total = toFiniteNumber(msg.media.document.size) ?? 0;
     }
+    let lastEmitMs = 0;
+    let lastEmitBytes = 0;
+    emitWebEvent("download-progress", {
+      id: transferId, percent: 0, uploaded_bytes: 0, total_bytes: total, speed_bytes_per_sec: 0,
+    });
     type IterArg = Parameters<typeof c.iterDownload>[0];
     for await (const chunk of c.iterDownload({
       file: msg.media as IterArg["file"],
@@ -318,20 +358,30 @@ export async function downloadFile(
     })) {
       if (isCancelled(transferId)) {
         clearCancellation(transferId);
-        throw new Error("Cancelled");
+        // Match the Tauri error string so the hook tags this as a cancel,
+        // not a red-toast error.
+        throw new Error("Transfer cancelled");
       }
       chunks.push(chunk as Uint8Array);
       receivedTotal += (chunk as Uint8Array).byteLength;
-      if (total > 0) {
-        const pct = Math.max(0, Math.min(100, Math.floor((receivedTotal / total) * 100)));
-        emitWebEvent("download-progress", { id: transferId, percent: pct });
-      }
+      const now = Date.now();
+      const dt = (now - lastEmitMs) / 1000;
+      if (lastEmitMs !== 0 && dt < 0.25) continue;
+      const speed = dt > 0 ? Math.max(0, Math.floor((receivedTotal - lastEmitBytes) / dt)) : 0;
+      const pct = total > 0 ? Math.min(99, Math.floor((receivedTotal / total) * 100)) : 0;
+      emitWebEvent("download-progress", {
+        id: transferId, percent: pct, uploaded_bytes: receivedTotal, total_bytes: total, speed_bytes_per_sec: speed,
+      });
+      lastEmitMs = now;
+      lastEmitBytes = receivedTotal;
     }
 
     const filename = filenameForMessage(msg) ?? lastSegment(savePath) ?? `file-${messageId}`;
     const buffer = concatChunks(chunks);
     triggerBlobDownload(buffer, filename, "application/octet-stream");
-    emitWebEvent("download-progress", { id: transferId, percent: 100 });
+    emitWebEvent("download-progress", {
+      id: transferId, percent: 100, uploaded_bytes: receivedTotal, total_bytes: total || receivedTotal, speed_bytes_per_sec: 0,
+    });
     recordDownload(receivedTotal);
   });
   clearCancellation(transferId);

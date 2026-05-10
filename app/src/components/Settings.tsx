@@ -315,6 +315,12 @@ export function Settings({ onClose, folders, bandwidth, locks }: SettingsProps) 
                     </Row>
                 </Section>
 
+                <Section title="Folders" description="Where new [TD] folders land in your Telegram dialog list.">
+                    <Row label="Archive newly created folders" hint="Move new [TD] folders into Telegram's archive so they don't clutter your inbox.">
+                        <Toggle checked={settings.archiveNewFolders} onChange={set('archiveNewFolders')} />
+                    </Row>
+                </Section>
+
                 <Section title="Thumbnails" description="Hide previews/thumbnails on file cards. Filenames remain visible.">
                     <Row label="Hide thumbnails everywhere" hint="Overrides per-folder settings.">
                         <Toggle checked={settings.hideThumbnailsGlobal} onChange={set('hideThumbnailsGlobal')} />
@@ -382,9 +388,10 @@ export function Settings({ onClose, folders, bandwidth, locks }: SettingsProps) 
                 <Section title="Sync" description="Cross-device settings sync (folder prefs, locks, killswitch attempts). Each device using the same Telegram account reads/writes a td-sync.json document at this location.">
                     <Row
                         label="Sync location"
-                        hint={settings.syncFolderId == null
+                        hint={(settings.syncFolderId == null
                             ? 'Saved Messages (default).'
-                            : `[TD] folder: ${folders.find(f => f.id === settings.syncFolderId)?.name ?? 'unknown'}.`}
+                            : `[TD] folder: ${folders.find(f => f.id === settings.syncFolderId)?.name ?? 'unknown'}.`)
+                            + ' This setting is per-device — each device picks its own location.'}
                     >
                         <select
                             value={settings.syncFolderId == null ? 'home' : String(settings.syncFolderId)}

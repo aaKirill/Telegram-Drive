@@ -64,6 +64,7 @@ pub fn run() {
                 passcode_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 passcode_key: Arc::new(std::sync::Mutex::new(None)),
                 generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancelled_transfers: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
             });
             app.manage(bandwidth::BandwidthManager::new(app.handle()));
             app.manage(StreamConfig { token: stream_token.clone(), port: STREAM_PORT });
@@ -95,6 +96,9 @@ pub fn run() {
             commands::cmd_auth_request_code,
             commands::cmd_auth_sign_in,
             commands::cmd_auth_check_password,
+            commands::cmd_auth_qr_login,
+            commands::cmd_auth_qr_poll,
+            commands::cmd_cancel_transfer,
             commands::cmd_get_files,
             commands::cmd_upload_file,
             commands::cmd_connect,

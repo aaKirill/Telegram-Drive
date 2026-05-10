@@ -399,7 +399,7 @@ async fn try_download_photo_thumbs(
     // Largest first — if it works we keep the best quality. We fall back to
     // smaller sizes only when the larger one fails (Telegram occasionally
     // returns empty bytes for specific thumb_size requests).
-    thumbs.sort_by(|a, b| b.size().cmp(&a.size()));
+    thumbs.sort_by_key(|t| std::cmp::Reverse(t.size()));
     log::info!("Trying {} photo thumb(s): {:?}", thumbs.len(),
         thumbs.iter().map(|t| format!("{}({}b)", t.photo_type(), t.size())).collect::<Vec<_>>());
     for thumb in thumbs {

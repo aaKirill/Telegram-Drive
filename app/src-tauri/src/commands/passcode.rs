@@ -250,7 +250,7 @@ pub fn cmd_passcode_set(
     let meta = PasscodeMeta {
         v: 1,
         salt: B64.encode(&salt),
-        verifier_nonce: B64.encode(&verifier_nonce),
+        verifier_nonce: B64.encode(verifier_nonce),
         verifier_ct: B64.encode(&verifier_ct),
     };
     write_meta(&meta_path, &meta)?;
@@ -361,7 +361,7 @@ pub fn cmd_passcode_change(
     let new_meta = PasscodeMeta {
         v: 1,
         salt: B64.encode(&salt),
-        verifier_nonce: B64.encode(&verifier_nonce),
+        verifier_nonce: B64.encode(verifier_nonce),
         verifier_ct: B64.encode(&verifier_ct),
     };
     write_meta(&meta_path, &new_meta)?;

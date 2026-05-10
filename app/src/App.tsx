@@ -15,7 +15,6 @@ import "./App.css";
 import { Toaster } from "sonner";
 import { ConfirmProvider } from "./context/ConfirmContext";
 import { ThemeProvider, useTheme } from "./context/ThemeContext";
-import { DropZoneProvider } from "./contexts/DropZoneContext";
 
 const queryClient = new QueryClient();
 
@@ -241,9 +240,7 @@ function App() {
             <ThemeProvider>
                 <QueryClientProvider client={queryClient}>
                     <ConfirmProvider>
-                        <DropZoneProvider>
-                            <AppContent />
-                        </DropZoneProvider>
+                        <AppContent />
                     </ConfirmProvider>
                 </QueryClientProvider>
             </ThemeProvider>

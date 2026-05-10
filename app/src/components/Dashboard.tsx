@@ -211,8 +211,16 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
     } = useFileOperations(activeFolderId, selectedIds, setSelectedIds, displayedFiles);
 
-    const { uploadQueue, setUploadQueue, handleManualUpload, cancelAll: cancelUploads, isDragging } = useFileUpload(activeFolderId, store);
-    const { downloadQueue, queueDownload, clearFinished: clearDownloads, cancelAll: cancelDownloads, dismissItem: dismissDownload } = useFileDownload(store);
+    const {
+        uploadQueue, setUploadQueue, handleManualUpload,
+        cancelAll: cancelUploads, cancelItem: cancelUploadItem, retryItem: retryUploadItem, dismissItem: dismissUploadItem,
+        isDragging,
+    } = useFileUpload(activeFolderId, store);
+    const {
+        downloadQueue, queueDownload,
+        clearFinished: clearDownloads,
+        cancelAll: cancelDownloads, cancelItem: cancelDownloadItem, retryItem: retryDownloadItem, dismissItem: dismissDownload,
+    } = useFileDownload(store);
 
 
     const handleSelectAll = useCallback(() => {
@@ -669,7 +677,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                 }}
                 onReorderFolders={handleReorderFolders}
                 onCreate={async (name, options) => {
-                    const created = await handleCreateFolder(name);
+                    const created = await handleCreateFolder(name, appSettings.archiveNewFolders);
                     if (created) {
                         const patch: { hideThumbnails?: boolean; hidden?: boolean } = {};
                         if (appSettings.hideThumbnailsForNewFolders) patch.hideThumbnails = true;
@@ -910,7 +918,12 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                 onCancelAllUploads={cancelUploads}
                 onClearDownloads={clearDownloads}
                 onCancelAllDownloads={cancelDownloads}
+                onDismissUpload={dismissUploadItem}
+                onCancelUpload={cancelUploadItem}
+                onRetryUpload={retryUploadItem}
                 onDismissDownload={dismissDownload}
+                onCancelDownload={cancelDownloadItem}
+                onRetryDownload={retryDownloadItem}
             />
         </div>
     );

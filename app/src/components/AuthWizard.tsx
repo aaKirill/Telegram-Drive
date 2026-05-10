@@ -1,12 +1,13 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "../lib/transport";
 import { motion, AnimatePresence } from "framer-motion";
-import { Phone, Key, Lock, ArrowRight, Settings, ShieldCheck, Sun, Moon, HelpCircle, ExternalLink, X } from "lucide-react";
+import { Phone, Key, Lock, ArrowRight, Settings, ShieldCheck, Sun, Moon, HelpCircle, ExternalLink, X, QrCode } from "lucide-react";
 import { load } from '@tauri-apps/plugin-store';
 import { useTheme } from '../context/ThemeContext';
 import { open } from '@tauri-apps/plugin-shell';
+import { QRCodeSVG } from 'qrcode.react';
 
-type Step = "setup" | "phone" | "code" | "password";
+type Step = "setup" | "phone" | "qr" | "code" | "password";
 
 function AuthThemeToggle() {
     const { theme, toggleTheme } = useTheme();
@@ -58,6 +59,9 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
     const [error, setError] = useState<string | null>(null);
     const [floodWait, setFloodWait] = useState<number | null>(null);
     const [showHelp, setShowHelp] = useState(false);
+    const [qrUrl, setQrUrl] = useState<string | null>(null);
+    const [qrPolling, setQrPolling] = useState(false);
+    const qrPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
 
     useEffect(() => {
@@ -194,6 +198,58 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
             setLoading(false);
         }
     };
+
+    const handleQrLogin = async () => {
+        setError(null);
+        setLoading(true);
+        try {
+            const idInt = parseInt(apiId, 10);
+            if (isNaN(idInt)) throw new Error("API ID must be a number");
+            await saveCredentials();
+            const url = await invoke<string>("cmd_auth_qr_login", { apiId: idInt, apiHash });
+            // The session was already authorized — no scan needed. Skip
+            // straight into the app.
+            if (url === "__authorized__") { onLogin(); return; }
+            setQrUrl(url);
+            setStep("qr");
+            setQrPolling(true);
+        } catch (err: unknown) {
+            setError(err instanceof Error ? err.message : String(err));
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Poll the backend every ~2s until the user accepts the QR on their
+    // phone. We don't re-export the token here — that would invalidate the
+    // QR currently on screen. cmd_auth_qr_poll just checks is_authorized.
+    useEffect(() => {
+        if (!qrPolling) {
+            if (qrPollRef.current) {
+                clearInterval(qrPollRef.current);
+                qrPollRef.current = null;
+            }
+            return;
+        }
+        qrPollRef.current = setInterval(async () => {
+            try {
+                const res = await invoke<{ success: boolean; next_step?: string }>("cmd_auth_qr_poll");
+                if (res.success) {
+                    setQrPolling(false);
+                    if (res.next_step === "password") setStep("password");
+                    else onLogin();
+                }
+            } catch {
+                // Transient — keep polling.
+            }
+        }, 2000);
+        return () => {
+            if (qrPollRef.current) {
+                clearInterval(qrPollRef.current);
+                qrPollRef.current = null;
+            }
+        };
+    }, [qrPolling]);
 
     return (
         <div className="h-full w-full auth-gradient flex items-center justify-center p-6 relative">
@@ -352,11 +408,67 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                                         >
                                             {loading ? "Connecting..." : <>Continue <ArrowRight className="w-5 h-5" /></>}
                                         </button>
+                                        <button
+                                            type="button"
+                                            onClick={handleQrLogin}
+                                            disabled={loading}
+                                            className="w-full bg-white/10 hover:bg-white/20 text-white py-3 rounded-xl flex items-center justify-center gap-2 transition-all border border-white/10 disabled:opacity-50"
+                                        >
+                                            <QrCode className="w-4 h-4" />
+                                            <span className="text-sm font-medium">Sign in with QR code</span>
+                                        </button>
                                         <button type="button" onClick={() => setStep("setup")} className="text-xs text-gray-500 hover:text-white transition-colors py-2">
                                             Back to Configuration
                                         </button>
                                     </div>
                                 </motion.form>
+                            )}
+
+                            {step === "qr" && (
+                                <motion.div
+                                    key="qr"
+                                    initial={{ x: 20, opacity: 0 }}
+                                    animate={{ x: 0, opacity: 1 }}
+                                    exit={{ x: -20, opacity: 0 }}
+                                    className="space-y-6"
+                                >
+                                    <div className="space-y-2 text-center">
+                                        <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider">Scan with Telegram</label>
+                                        <p className="text-xs text-gray-500 leading-relaxed">
+                                            Open Telegram on your phone → Settings → Devices → Link Desktop Device, then scan this code.
+                                        </p>
+                                    </div>
+                                    <div className="flex flex-col items-center gap-4">
+                                        <div className="bg-white p-4 rounded-xl">
+                                            {qrUrl ? (
+                                                <QRCodeSVG value={qrUrl} size={208} level="M" />
+                                            ) : (
+                                                <div className="w-52 h-52 flex items-center justify-center text-black/60">Loading…</div>
+                                            )}
+                                        </div>
+                                        <div className="flex items-center gap-2 text-xs text-gray-400">
+                                            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                                            Waiting for scan…
+                                        </div>
+                                    </div>
+                                    <div className="flex flex-col gap-3">
+                                        <button
+                                            type="button"
+                                            onClick={handleQrLogin}
+                                            disabled={loading}
+                                            className="w-full bg-white/10 hover:bg-white/20 text-white py-3 rounded-xl text-sm transition-all border border-white/10 disabled:opacity-50"
+                                        >
+                                            {loading ? "Refreshing…" : "Refresh QR"}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => { setQrPolling(false); setQrUrl(null); setStep("phone"); }}
+                                            className="text-xs text-gray-500 hover:text-white transition-colors py-2"
+                                        >
+                                            Use phone number instead
+                                        </button>
+                                    </div>
+                                </motion.div>
                             )}
 
 

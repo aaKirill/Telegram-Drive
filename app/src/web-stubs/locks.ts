@@ -158,15 +158,19 @@ export async function exportLocks(): Promise<Record<string, string>> {
 }
 
 export async function importLocks(remote: Record<string, string>): Promise<void> {
-  // Replace the local set with the remote set wholesale (LWW).
+  // MERGE-ADD ONLY — never delete existing entries during sync apply.
+  // Locks are sticky-once-set: removal must be an explicit local action.
+  // See cmd_import_folder_locks for the rationale.
   const existing = await listAllLockedKeys();
-  for (const key of existing) await idbDel(LOCK_KEY_PREFIX + key);
+  const existingSet = new Set(existing);
+  let wrote = 0;
   for (const [key, phc] of Object.entries(remote)) {
-    if (typeof phc === "string" && phc.startsWith("$argon2")) {
-      await idbSet(LOCK_KEY_PREFIX + key, phc);
-    }
+    if (typeof phc !== "string" || !phc.startsWith("$argon2")) continue;
+    if (existingSet.has(key)) continue;
+    await idbSet(LOCK_KEY_PREFIX + key, phc);
+    wrote++;
   }
-  unlockedFolders.clear();
+  if (wrote > 0) unlockedFolders.clear();
 }
 
 export async function exportAttempts(): Promise<Record<string, number>> {
@@ -174,6 +178,9 @@ export async function exportAttempts(): Promise<Record<string, number>> {
 }
 
 export async function importAttempts(remote: Record<string, number>): Promise<void> {
+  // Same guard — empty incoming attempts shouldn't wipe the local map.
+  const existing = (await idbGet<Record<string, number>>(ATTEMPTS_KEY)) ?? {};
+  if (Object.keys(remote).length === 0 && Object.keys(existing).length > 0) return;
   await idbSet(ATTEMPTS_KEY, { ...remote });
 }
 

@@ -37,6 +37,7 @@ fn ext_from_mime(mime: Option<&str>) -> Option<&'static str> {
 #[tauri::command]
 pub async fn cmd_create_folder(
     name: String,
+    archive: bool,
     state: State<'_, TelegramState>,
 ) -> Result<FolderMetadata, String> {
     let client_opt = {
@@ -88,8 +89,24 @@ pub async fn cmd_create_folder(
 
     let _ = client.invoke(&tl::functions::messages::SetHistoryTtl {
         peer: tl::enums::InputPeer::Channel(tl::types::InputPeerChannel { channel_id: chat_id, access_hash }),
-        period: 0, 
+        period: 0,
     }).await;
+
+    if archive {
+        // Move the freshly created [TD] channel into Telegram's archive (folder
+        // 1) so it doesn't clutter the user's inbox dialog list. Non-fatal:
+        // a failure here leaves the channel in the inbox, which is recoverable
+        // — the channel itself was created successfully.
+        let archive_res = client.invoke(&tl::functions::folders::EditPeerFolders {
+            folder_peers: vec![tl::enums::InputFolderPeer::Peer(tl::types::InputFolderPeer {
+                peer: tl::enums::InputPeer::Channel(tl::types::InputPeerChannel { channel_id: chat_id, access_hash }),
+                folder_id: 1,
+            })],
+        }).await;
+        if let Err(e) = archive_res {
+            log::warn!("Failed to archive new folder {}: {}", chat_id, e);
+        }
+    }
 
     Ok(FolderMetadata {
         id: chat_id,
@@ -146,6 +163,82 @@ pub async fn cmd_delete_folder(
 struct ProgressPayload {
     id: String,
     percent: u8,
+    uploaded_bytes: u64,
+    total_bytes: u64,
+    speed_bytes_per_sec: u64,
+}
+
+/// AsyncRead wrapper that increments an AtomicU64 with bytes consumed.
+/// Paired with a ticker task in cmd_upload_file to derive percent/speed
+/// without wedging the upload itself — `client.upload_stream` doesn't
+/// expose any per-chunk callback, so we observe progress out-of-band.
+struct ProgressReader {
+    inner: tokio::io::BufReader<tokio::fs::File>,
+    bytes_read: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ProgressReader {
+    async fn new(path: &str) -> Result<(Self, u64, std::sync::Arc<std::sync::atomic::AtomicU64>), String> {
+        let file = tokio::fs::File::open(path).await.map_err(|e| e.to_string())?;
+        let metadata = file.metadata().await.map_err(|e| e.to_string())?;
+        let size = metadata.len();
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let reader = Self {
+            inner: tokio::io::BufReader::new(file),
+            bytes_read: counter.clone(),
+        };
+        Ok((reader, size, counter))
+    }
+}
+
+impl tokio::io::AsyncRead for ProgressReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let std::task::Poll::Ready(Ok(())) = &result {
+            let after = buf.filled().len();
+            let delta = (after - before) as u64;
+            self.bytes_read.fetch_add(delta, std::sync::atomic::Ordering::Relaxed);
+        }
+        result
+    }
+}
+
+/// Best-effort cleanup of a leftover .partial download file. Spawns off the
+/// async runtime because the file may still be held by the chunk-writing
+/// task for a few hundred ms after the loop bails — five 1-second retries
+/// covers the realistic ranges without blocking the command return.
+fn cleanup_partial_file(path: &str) {
+    let path = path.to_string();
+    std::thread::spawn(move || {
+        for attempt in 0..5 {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    log::info!("Cleaned up partial file: {}", path);
+                    return;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+                Err(e) => {
+                    log::warn!("Cleanup attempt {}/5 failed for {}: {}", attempt + 1, path, e);
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+        }
+    });
+}
+
+#[tauri::command]
+pub async fn cmd_cancel_transfer(
+    transfer_id: String,
+    state: State<'_, TelegramState>,
+) -> Result<bool, String> {
+    log::info!("Cancelling transfer: {}", transfer_id);
+    state.cancelled_transfers.write().await.insert(transfer_id);
+    Ok(true)
 }
 
 #[tauri::command]
@@ -172,17 +265,79 @@ pub async fn cmd_upload_file(
 
     // Emit start progress
     if !tid.is_empty() {
-        let _ = app_handle.emit("upload-progress", ProgressPayload { id: tid.clone(), percent: 0 });
+        let _ = app_handle.emit("upload-progress", ProgressPayload {
+            id: tid.clone(), percent: 0, uploaded_bytes: 0, total_bytes: size, speed_bytes_per_sec: 0,
+        });
     }
 
-    let path_clone = path.clone();
+    // Open the file as an AsyncRead with a byte counter we can poll
+    // out-of-band. upload_stream takes ownership of the read half but
+    // doesn't surface per-chunk progress.
+    let (mut reader, file_size, bytes_counter) = ProgressReader::new(&path).await?;
+    let file_name = std::path::Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+
+    // Tick task: derives percent + speed from the AtomicU64. Ticks at
+    // 250ms and aborts when bytes >= size or the user cancels. Capped at
+    // 99% so the final 100% emit comes from the post-upload path with
+    // authoritative numbers.
+    let cancelled = state.cancelled_transfers.clone();
+    let progress_tid = tid.clone();
+    let progress_handle = app_handle.clone();
+    let progress_counter = bytes_counter.clone();
+    let progress_task = if !tid.is_empty() {
+        Some(tokio::spawn(async move {
+            let mut last_bytes: u64 = 0;
+            let mut last_time = std::time::Instant::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let current = progress_counter.load(std::sync::atomic::Ordering::Relaxed);
+                let now = std::time::Instant::now();
+                let dt = now.duration_since(last_time).as_secs_f64();
+                let speed = if dt > 0.0 { ((current.saturating_sub(last_bytes)) as f64 / dt) as u64 } else { 0 };
+                let percent = if file_size > 0 { ((current as f64 / file_size as f64) * 100.0).min(99.0) as u8 } else { 0 };
+
+                let _ = progress_handle.emit("upload-progress", ProgressPayload {
+                    id: progress_tid.clone(), percent, uploaded_bytes: current, total_bytes: file_size, speed_bytes_per_sec: speed,
+                });
+
+                last_bytes = current;
+                last_time = now;
+
+                if file_size > 0 && current >= file_size { break; }
+                if cancelled.read().await.contains(&progress_tid) { break; }
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Pre-flight cancel check: user can cancel before upload even starts.
+    if !tid.is_empty() && state.cancelled_transfers.read().await.contains(&tid) {
+        state.cancelled_transfers.write().await.remove(&tid);
+        if let Some(t) = progress_task { t.abort(); }
+        return Err("Transfer cancelled".to_string());
+    }
+
     let client_clone = client.clone();
+    let upload_result = tokio::spawn(async move {
+        client_clone.upload_stream(&mut reader, file_size as usize, file_name).await
+    }).await.map_err(|e| format!("Task join error: {}", e))?;
 
-    let uploaded_file = tauri::async_runtime::spawn(async move {
-        client_clone.upload_file(&path_clone).await
-    }).await.map_err(|e| format!("Task join error: {}", e))?
-      .map_err(map_error)?;
+    if let Some(t) = progress_task { t.abort(); }
 
+    // Post-upload cancel check: the upload future itself can't be aborted
+    // mid-flight (no select! seam in upload_stream), so a mid-flight cancel
+    // still completes the network upload. We just skip the send_message so
+    // nothing user-visible lands in the channel.
+    if !tid.is_empty() && state.cancelled_transfers.read().await.contains(&tid) {
+        state.cancelled_transfers.write().await.remove(&tid);
+        return Err("Transfer cancelled".to_string());
+    }
+
+    let uploaded_file = upload_result.map_err(map_error)?;
     let message = InputMessage::new().text("").file(uploaded_file);
 
     let peer = resolve_peer(&client, folder_id, &state.peer_cache).await?;
@@ -193,7 +348,9 @@ pub async fn cmd_upload_file(
 
     // Emit completion
     if !tid.is_empty() {
-        let _ = app_handle.emit("upload-progress", ProgressPayload { id: tid, percent: 100 });
+        let _ = app_handle.emit("upload-progress", ProgressPayload {
+            id: tid, percent: 100, uploaded_bytes: size, total_bytes: size, speed_bytes_per_sec: 0,
+        });
     }
 
     // Build FileMetadata from the just-sent message so the frontend can
@@ -297,26 +454,65 @@ pub async fn cmd_download_file(
 
     // Emit start
     if !tid.is_empty() {
-        let _ = app_handle.emit("download-progress", ProgressPayload { id: tid.clone(), percent: 0 });
+        let _ = app_handle.emit("download-progress", ProgressPayload {
+            id: tid.clone(), percent: 0, uploaded_bytes: 0, total_bytes: total_size, speed_bytes_per_sec: 0,
+        });
     }
 
-    // Stream download with per-chunk progress
+    // Pre-flight cancel check.
+    if !tid.is_empty() && state.cancelled_transfers.read().await.contains(&tid) {
+        state.cancelled_transfers.write().await.remove(&tid);
+        cleanup_partial_file(&save_path);
+        return Err("Transfer cancelled".to_string());
+    }
+
+    // Stream download with per-chunk progress + cancellation polling.
     let mut download_iter = client.iter_download(&media);
     let mut file = std::fs::File::create(&save_path).map_err(|e| e.to_string())?;
     let mut downloaded: u64 = 0;
-    let mut last_percent: u8 = 0;
+    let mut last_emit_time = std::time::Instant::now();
+    let mut last_emit_bytes: u64 = 0;
 
     while let Some(chunk) = download_iter.next().await.transpose() {
-        let bytes = chunk.map_err(|e| format!("Download chunk error: {}", e))?;
-        std::io::Write::write_all(&mut file, &bytes).map_err(|e| e.to_string())?;
+        // Cancellation check between chunks. We close the file, drop the
+        // path on the floor (cleanup_partial_file will remove the half-
+        // written contents), and return — distinct error string so the
+        // hook layer can mark the row 'cancelled' instead of 'error'.
+        if !tid.is_empty() && state.cancelled_transfers.read().await.contains(&tid) {
+            state.cancelled_transfers.write().await.remove(&tid);
+            drop(file);
+            cleanup_partial_file(&save_path);
+            return Err("Transfer cancelled".to_string());
+        }
+
+        let bytes = match chunk {
+            Ok(b) => b,
+            Err(e) => {
+                drop(file);
+                cleanup_partial_file(&save_path);
+                return Err(format!("Download chunk error: {}", e));
+            }
+        };
+        if let Err(e) = std::io::Write::write_all(&mut file, &bytes) {
+            drop(file);
+            cleanup_partial_file(&save_path);
+            return Err(e.to_string());
+        }
         downloaded += bytes.len() as u64;
-        
-        if !tid.is_empty() && total_size > 0 {
-            let percent = ((downloaded as f64 / total_size as f64) * 100.0).min(100.0) as u8;
-            // Only emit when percent actually changes to avoid event spam
-            if percent != last_percent {
-                last_percent = percent;
-                let _ = app_handle.emit("download-progress", ProgressPayload { id: tid.clone(), percent });
+
+        // Throttle emits to ~250ms ticks so a fast download doesn't drown
+        // the event channel. Speed is bytes-since-last-emit / dt.
+        if !tid.is_empty() {
+            let now = std::time::Instant::now();
+            let dt = now.duration_since(last_emit_time).as_secs_f64();
+            if dt >= 0.25 {
+                let speed = if dt > 0.0 { ((downloaded.saturating_sub(last_emit_bytes)) as f64 / dt) as u64 } else { 0 };
+                let percent = if total_size > 0 { ((downloaded as f64 / total_size as f64) * 100.0).min(99.0) as u8 } else { 0 };
+                let _ = app_handle.emit("download-progress", ProgressPayload {
+                    id: tid.clone(), percent, uploaded_bytes: downloaded, total_bytes: total_size, speed_bytes_per_sec: speed,
+                });
+                last_emit_time = now;
+                last_emit_bytes = downloaded;
             }
         }
     }
@@ -325,7 +521,9 @@ pub async fn cmd_download_file(
 
     // Emit completion
     if !tid.is_empty() {
-        let _ = app_handle.emit("download-progress", ProgressPayload { id: tid, percent: 100 });
+        let _ = app_handle.emit("download-progress", ProgressPayload {
+            id: tid, percent: 100, uploaded_bytes: downloaded, total_bytes: total_size, speed_bytes_per_sec: 0,
+        });
     }
 
     Ok("Download successful".to_string())
@@ -562,16 +760,14 @@ pub async fn cmd_search_global(
         for chat in &raw_chats {
             match chat {
                 tl::enums::Chat::Channel(c) => {
-                    let id = c.id;
-                    if !cache.contains_key(&id) {
-                        cache.insert(id, Peer::from_raw(chat.clone()));
+                    if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(c.id) {
+                        e.insert(Peer::from_raw(chat.clone()));
                         added += 1;
                     }
                 }
                 tl::enums::Chat::ChannelForbidden(c) => {
-                    let id = c.id;
-                    if !cache.contains_key(&id) {
-                        cache.insert(id, Peer::from_raw(chat.clone()));
+                    if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(c.id) {
+                        e.insert(Peer::from_raw(chat.clone()));
                         added += 1;
                     }
                 }
@@ -715,9 +911,7 @@ pub async fn cmd_scan_folders(
         for chat in &chats_out {
             if let tl::enums::Chat::Channel(c) = chat {
                 let id = c.id;
-                if !peer_cache.contains_key(&id) {
-                    peer_cache.insert(id, Peer::from_raw(chat.clone()));
-                }
+                peer_cache.entry(id).or_insert_with(|| Peer::from_raw(chat.clone()));
                 let name = c.title.clone();
                 match_channel_folder(&mut folders, id, name);
             }

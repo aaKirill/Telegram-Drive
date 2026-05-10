@@ -45,13 +45,15 @@ const HANDLERS: Record<string, Handler> = {
   cmd_auth_request_code: (a) => client.authRequestCode(String(a?.phone ?? "")),
   cmd_auth_sign_in: (a) => client.authSignIn(String(a?.code ?? "")),
   cmd_auth_check_password: (a) => client.authCheckPassword(String(a?.password ?? "")),
+  cmd_auth_qr_login: (a) => client.qrLogin(Number(a?.apiId), String(a?.apiHash ?? "")),
+  cmd_auth_qr_poll: () => client.qrPoll(),
   cmd_logout: () => client.logout(),
 
   cmd_clean_cache: () => { files.clearAllBlobs(); return undefined; },
   cmd_is_network_available: () => navigator.onLine,
 
   cmd_scan_folders: () => folders.scanFolders(),
-  cmd_create_folder: (a) => folders.createFolder(String(a?.name ?? "")),
+  cmd_create_folder: (a) => folders.createFolder(String(a?.name ?? ""), Boolean(a?.archive)),
   cmd_delete_folder: (a) => folders.deleteFolder(Number(a?.folderId)),
   cmd_get_files: (a) => folders.getFiles(a?.folderId == null ? null : Number(a.folderId)),
   cmd_search_global: (a) => folders.searchGlobal(String(a?.query ?? "")),

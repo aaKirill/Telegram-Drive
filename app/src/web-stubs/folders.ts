@@ -84,6 +84,19 @@ export async function scanFolders(): Promise<TelegramFolder[]> {
   return out;
 }
 
+// Cache of resolved InputPeerChannels keyed by raw channel id. Populated
+// during scanFolders so later getFiles/deleteFolder/etc don't have to
+// re-walk dialogs to reload an accessHash that gramjs's session store
+// sometimes drops between page loads. Without this cache, accounts with
+// many dialogs would intermittently hit "Could not find the input entity"
+// for arbitrary [TD] folders — the fallback iterDialogs in
+// resolveChannelInput is the second line of defense, not the first.
+const channelInputCache = new Map<number, Api.InputPeerChannel>();
+
+export function clearChannelInputCache(): void {
+  channelInputCache.clear();
+}
+
 function consumeDialog(
   dialog: { entity?: Api.TypeChat | Api.TypeUser },
   out: TelegramFolder[],
@@ -98,10 +111,16 @@ function consumeDialog(
   if (title.toLowerCase().includes("[td]")) {
     seen.add(id);
     out.push({ id, name: cleanName(title), parent_id: null });
+    if (entity.accessHash) {
+      channelInputCache.set(id, new Api.InputPeerChannel({
+        channelId: entity.id,
+        accessHash: entity.accessHash,
+      }));
+    }
   }
 }
 
-export async function createFolder(name: string): Promise<TelegramFolder> {
+export async function createFolder(name: string, archive: boolean): Promise<TelegramFolder> {
   const c = await ensureClient();
   const result = await c.invoke(
     new Api.channels.CreateChannel({
@@ -114,16 +133,33 @@ export async function createFolder(name: string): Promise<TelegramFolder> {
   const updates = result as Api.Updates;
   const channel = updates.chats.find((ch) => ch instanceof Api.Channel) as Api.Channel | undefined;
   if (!channel) throw new Error("Channel not in CreateChannel response");
+  const inputPeer = utils.getInputPeer(channel);
   // Disable history TTL so files don't auto-expire.
   try {
     await c.invoke(
       new Api.messages.SetHistoryTTL({
-        peer: utils.getInputPeer(channel),
+        peer: inputPeer,
         period: 0,
       }),
     );
   } catch {
     // Non-fatal — TTL only matters for some accounts.
+  }
+  if (archive) {
+    // Move the new channel into Telegram's archive (folder 1) so it doesn't
+    // clutter the user's inbox dialog list. Non-fatal — a failure leaves
+    // the channel visible in the inbox, which is recoverable.
+    try {
+      await c.invoke(
+        new Api.folders.EditPeerFolders({
+          folderPeers: [
+            new Api.InputFolderPeer({ peer: inputPeer, folderId: 1 }),
+          ],
+        }),
+      );
+    } catch (err) {
+      console.warn("[td] failed to archive new folder:", err);
+    }
   }
   return { id: asNumber(channel.id), name, parent_id: null };
 }
@@ -136,32 +172,60 @@ export async function createFolder(name: string): Promise<TelegramFolder> {
  * like `deleteFolder` raise `Could not find the input entity for
  * {userId, PeerUser}`. This helper:
  *
- *   1. asks gramjs explicitly for an `Api.PeerChannel`, which bypasses the
+ *   1. checks the module-level cache populated by scanFolders;
+ *   2. asks gramjs explicitly for an `Api.PeerChannel`, which bypasses the
  *      user-first heuristic;
- *   2. on cache miss, runs `iterDialogs` (both inbox + archive) once so
- *      gramjs caches accessHashes for every channel the account knows
- *      about, then retries.
+ *   3. on cache miss, runs `iterDialogs` (both inbox + archive) without a
+ *      page cap so accounts with hundreds of dialogs don't lose obscure
+ *      [TD] folders past the first 200, then retries via Channel-class
+ *      input followed by raw PeerChannel.
  */
 export async function resolveChannelInput(c: Awaited<ReturnType<typeof ensureClient>>, folderId: number): Promise<Api.InputPeerChannel> {
+  const cached = channelInputCache.get(folderId);
+  if (cached) return cached;
+
   const peer = new Api.PeerChannel({ channelId: bigInt(folderId) });
-  let entity;
   try {
-    entity = await c.getInputEntity(peer);
-  } catch {
-    // Force-populate the entity cache. iterDialogs is the cheapest known
-    // way to make gramjs commit accessHashes for every visible channel
-    // into its session storage.
-    try {
-      for await (const _ of c.iterDialogs({ limit: 200 })) { void _; }
-    } catch { /* non-fatal */ }
-    try {
-      for await (const _ of c.iterDialogs({ archived: true, limit: 200 })) { void _; }
-    } catch { /* non-fatal */ }
-    entity = await c.getInputEntity(peer);
-  }
+    const entity = await c.getInputEntity(peer);
+    if (entity instanceof Api.InputPeerChannel) {
+      channelInputCache.set(folderId, entity);
+      return entity;
+    }
+  } catch { /* fall through */ }
+
+  // Force-populate the entity cache. Run unbounded so accounts with
+  // many dialogs don't truncate [TD] folders out of the walk.
+  try {
+    for await (const dialog of c.iterDialogs({})) {
+      const e = dialog.entity;
+      if (e instanceof Api.Channel && !e.megagroup && e.accessHash) {
+        channelInputCache.set(asNumber(e.id), new Api.InputPeerChannel({
+          channelId: e.id,
+          accessHash: e.accessHash,
+        }));
+      }
+    }
+  } catch { /* non-fatal */ }
+  try {
+    for await (const dialog of c.iterDialogs({ archived: true })) {
+      const e = dialog.entity;
+      if (e instanceof Api.Channel && !e.megagroup && e.accessHash) {
+        channelInputCache.set(asNumber(e.id), new Api.InputPeerChannel({
+          channelId: e.id,
+          accessHash: e.accessHash,
+        }));
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  const refreshed = channelInputCache.get(folderId);
+  if (refreshed) return refreshed;
+
+  const entity = await c.getInputEntity(peer);
   if (!(entity instanceof Api.InputPeerChannel)) {
     throw new Error("Folder is not a channel");
   }
+  channelInputCache.set(folderId, entity);
   return entity;
 }
 

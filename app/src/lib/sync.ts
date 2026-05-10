@@ -13,7 +13,6 @@ import {
   DEFAULT_SETTINGS,
   type AppSettings,
   getCurrentSettings,
-  getSyncFolderIdLocalTs,
   setSettingsFromSync,
 } from "../hooks/useAppSettings";
 import {
@@ -52,12 +51,6 @@ const DEVICE: "web" | "tauri" =
   import.meta.env.VITE_TARGET === "web" ? "web" : "tauri";
 
 const LAST_SEEN_KEY = "_sync_last_seen_ts";
-// Folder id we last successfully read/wrote sync data to. When the user
-// changes the sync folder selection, we purge td-sync.json messages from
-// the OLD location before the next push so abandoned snapshots don't
-// pile up. Stringified ("home" for null = Saved Messages) since
-// localStorage only takes strings.
-const LAST_FOLDER_KEY = "_sync_last_folder_id";
 
 let lastSeenTs = 0;
 let dirty = false;
@@ -72,19 +65,6 @@ function loadLastSeen(): number {
 function saveLastSeen(ts: number): void {
   if (typeof localStorage === "undefined") return;
   localStorage.setItem(LAST_SEEN_KEY, String(ts));
-}
-
-function loadLastFolder(): number | null | undefined {
-  if (typeof localStorage === "undefined") return undefined;
-  const v = localStorage.getItem(LAST_FOLDER_KEY);
-  if (v == null) return undefined;
-  if (v === "home") return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : undefined;
-}
-function saveLastFolder(folderId: number | null): void {
-  if (typeof localStorage === "undefined") return;
-  localStorage.setItem(LAST_FOLDER_KEY, folderId == null ? "home" : String(folderId));
 }
 
 function ensureInit(): void {
@@ -110,37 +90,6 @@ export async function runSync(): Promise<void> {
   if (inflight) return inflight;
   inflight = (async () => {
     try {
-      // If the sync folder selection has changed since the last successful
-      // sync, push the *current local* state to BOTH locations:
-      //   - OLD: serves as a redirect — clients still reading there pick
-      //     up the new syncFolderId from settings and migrate themselves.
-      //   - NEW: ensures the new location reflects current state. Without
-      //     this, a stale snapshot left at the new location from a prior
-      //     visit (e.g. you toggle null → X → null → X again) would be
-      //     pulled-and-applied below and silently roll us back.
-      // After both writes we save and return — there's nothing useful to
-      // pull this cycle (we just authored the network), and any concurrent
-      // remote update will surface on the next runSync.
-      const currentFolder = getCurrentSettings().syncFolderId ?? null;
-      const previousFolder = loadLastFolder();
-      if (previousFolder !== undefined && previousFolder !== currentFolder) {
-        try {
-          const local = await buildLocalSnapshot();
-          local.ts = Math.max(Date.now(), lastSeenTs + 1);
-          try { await pushSnapshotTo(previousFolder, local); }
-          catch (e) { console.warn("[td] sync redirect write at old folder failed:", e); }
-          try { await pushSnapshotTo(currentFolder, local); }
-          catch (e) { console.warn("[td] sync write at new folder failed:", e); }
-          lastSeenTs = local.ts;
-          saveLastSeen(local.ts);
-          dirty = false;
-          saveLastFolder(currentFolder);
-        } catch (e) {
-          console.warn("[td] sync migration failed:", e);
-        }
-        return;
-      }
-
       const dirtyAtStart = dirty;
       const remote = await pullSnapshot();
       let appliedRemote = false;
@@ -169,9 +118,6 @@ export async function runSync(): Promise<void> {
           // Leave dirty=true so the next runSync retries.
         }
       }
-      // Record the folder we just read from / wrote to so a later
-      // selection change can detect the divergence and purge.
-      saveLastFolder(currentFolder);
       void appliedRemote;
     } finally {
       inflight = null;
@@ -212,8 +158,11 @@ async function pushSnapshotTo(folderId: number | null, snap: Snapshot): Promise<
 // Settings keys that are intentionally NOT synced — each device keeps its
 // own value. defaultView is per-device because users naturally want
 // different layouts on phone vs. a 27" monitor; gridColumnsDesktop is
-// only meaningful on desktop and at different display widths.
-const PER_DEVICE_SETTINGS = ['defaultView', 'gridColumnsDesktop'] as const satisfies ReadonlyArray<keyof AppSettings>;
+// only meaningful on desktop and at different display widths;
+// syncFolderId is the location *this device* reads/writes to and would
+// be self-referential if shared — letting one device dictate everyone
+// else's sync target was confusing and made selection changes ricochet.
+const PER_DEVICE_SETTINGS = ['defaultView', 'gridColumnsDesktop', 'syncFolderId'] as const satisfies ReadonlyArray<keyof AppSettings>;
 
 // Stable per-device id, generated once. Used to slot this device's
 // bandwidth contribution into the shared snapshot without overwriting
@@ -340,15 +289,6 @@ async function writeFoldersToStore(folders: TelegramFolder[]): Promise<void> {
 async function applySnapshot(snap: Snapshot): Promise<void> {
   if (snap.settings) {
     const merged: AppSettings = { ...DEFAULT_SETTINGS, ...snap.settings } as AppSettings;
-    // Don't let an older remote snapshot clobber a freshly-made local
-    // syncFolderId choice — when you toggle the sync location back to a
-    // previous one, the redirect we left at the destination still has
-    // syncFolderId=<other> and would otherwise drag us back. Other
-    // settings still apply normally (LWW on whole snapshot).
-    const localTs = getSyncFolderIdLocalTs();
-    if (localTs > 0 && snap.ts < localTs) {
-      merged.syncFolderId = getCurrentSettings().syncFolderId;
-    }
     // Per-device settings are never overwritten by a remote snapshot.
     // (Old snapshots written before this filter went in may carry these
     //  keys; ignore them.)
@@ -358,15 +298,26 @@ async function applySnapshot(snap: Snapshot): Promise<void> {
     }
     await setSettingsFromSync(merged);
   }
-  if (snap.folderPrefs) {
-    await setPrefsFromSync(snap.folderPrefs);
+  // Empty-snapshot guard for folderPrefs. setPrefsFromSync still does
+  // wholesale-replace (prefs are less load-bearing than locks and a
+  // user genuinely clearing every pref should propagate). We just refuse
+  // to replace populated local prefs with empty incoming, which catches
+  // the "freshly-wiped device pushes first" case.
+  const localPrefsCount = Object.keys(getCurrentPrefs()).length;
+  const hasIncomingPrefs = snap.folderPrefs && Object.keys(snap.folderPrefs).length > 0;
+  if (hasIncomingPrefs || (snap.folderPrefs && localPrefsCount === 0)) {
+    await setPrefsFromSync(snap.folderPrefs ?? {});
   }
+  // Folder locks: import is merge-add at the command layer (see
+  // cmd_import_folder_locks / web-stubs/locks.ts:importLocks). Always
+  // forward — empty maps are no-ops there.
   if (snap.folderLocks) {
     try {
       await invoke("cmd_import_folder_locks", { locks: snap.folderLocks });
     } catch { /* older Tauri builds skip; non-fatal */ }
   }
-  if (snap.lockAttempts) {
+  const hasIncomingAttempts = snap.lockAttempts && Object.keys(snap.lockAttempts).length > 0;
+  if (hasIncomingAttempts) {
     try {
       await invoke("cmd_import_lock_attempts", { attempts: snap.lockAttempts });
     } catch { /* same */ }

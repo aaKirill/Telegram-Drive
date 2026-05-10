@@ -36,7 +36,7 @@ const setState = (patch: Partial<UpdateState>) => {
     subscribers.forEach(fn => fn());
 };
 
-export async function checkForUpdates(): Promise<void> {
+async function checkForUpdates(): Promise<void> {
     setState({ checking: true, error: null, notFound: false });
     try {
         const updateInfo = await check();
@@ -63,7 +63,7 @@ function stringifyErr(err: unknown): string {
     return 'Failed to check for updates';
 }
 
-export async function downloadAndInstall(): Promise<void> {
+async function downloadAndInstall(): Promise<void> {
     if (!_update) return;
     setState({ downloading: true, progress: 0 });
     let downloaded = 0;
@@ -107,7 +107,7 @@ export async function downloadAndInstall(): Promise<void> {
     }
 }
 
-export function dismissUpdate(): void {
+function dismissUpdate(): void {
     _update = null;
     setState({ available: false });
 }

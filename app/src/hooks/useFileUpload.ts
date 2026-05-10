@@ -12,6 +12,9 @@ import type { Store } from '@tauri-apps/plugin-store';
 interface ProgressPayload {
     id: string;
     percent: number;
+    uploaded_bytes: number;
+    total_bytes: number;
+    speed_bytes_per_sec: number;
 }
 
 export function useFileUpload(activeFolderId: number | null, store: Store | null) {
@@ -26,7 +29,13 @@ export function useFileUpload(activeFolderId: number | null, store: Store | null
         let unlisten: UnlistenFn | undefined;
         listen<ProgressPayload>('upload-progress', (event) => {
             setUploadQueue(q => q.map(i =>
-                i.id === event.payload.id ? { ...i, progress: event.payload.percent } : i
+                i.id === event.payload.id ? {
+                    ...i,
+                    progress: event.payload.percent,
+                    uploadedBytes: event.payload.uploaded_bytes,
+                    totalBytes: event.payload.total_bytes,
+                    speedBytesPerSec: event.payload.speed_bytes_per_sec,
+                } : i
             ));
         }).then(fn => { unlisten = fn; });
         return () => { unlisten?.(); };
@@ -109,8 +118,18 @@ export function useFileUpload(activeFolderId: number | null, store: Store | null
             }
         } catch (e) {
             if (!cancelledRef.current.has(item.id)) {
-                setUploadQueue(q => q.map(i => i.id === item.id ? { ...i, status: 'error', error: String(e) } : i));
-                toast.error(`Upload failed for ${item.path.split('/').pop()}: ${e}`);
+                const errMsg = String(e);
+                // Distinguish a user-cancel from a real failure. The Rust
+                // upload/download paths return this exact string when the
+                // tid is in TelegramState.cancelled_transfers; treating it
+                // as 'error' would surface a red toast for the user's own
+                // action.
+                if (errMsg.includes('Transfer cancelled')) {
+                    setUploadQueue(q => q.map(i => i.id === item.id ? { ...i, status: 'cancelled' } : i));
+                } else {
+                    setUploadQueue(q => q.map(i => i.id === item.id ? { ...i, status: 'error', error: errMsg } : i));
+                    toast.error(`Upload failed for ${item.path.split('/').pop()}: ${e}`);
+                }
             } else {
                 cancelledRef.current.delete(item.id);
             }
@@ -143,9 +162,6 @@ export function useFileUpload(activeFolderId: number | null, store: Store | null
             const uploading = q.find(i => i.status === 'uploading');
             if (uploading) {
                 cancelledRef.current.add(uploading.id);
-                // Best-effort cancel signal: the web build wires this into
-                // gramjs progress checks; the Tauri build doesn't have a
-                // matching command and the .catch swallows the rejection.
                 invoke('cmd_cancel_transfer', { transferId: uploading.id }).catch(() => { });
             }
             return q
@@ -155,6 +171,35 @@ export function useFileUpload(activeFolderId: number | null, store: Store | null
         toast.info('All uploads cancelled');
     };
 
+    const cancelItem = (id: string) => {
+        setUploadQueue(q => {
+            const item = q.find(i => i.id === id);
+            if (item?.status === 'uploading') {
+                cancelledRef.current.add(id);
+                invoke('cmd_cancel_transfer', { transferId: id }).catch(() => { });
+                return q.map(i => i.id === id ? { ...i, status: 'cancelled' as const } : i);
+            }
+            // Pending items haven't started — drop straight from queue.
+            if (item?.status === 'pending') {
+                return q.filter(i => i.id !== id);
+            }
+            return q;
+        });
+    };
+
+    const retryItem = (id: string) => {
+        setUploadQueue(q => q.map(i =>
+            i.id === id && (i.status === 'error' || i.status === 'cancelled')
+                ? { ...i, status: 'pending' as const, error: undefined, progress: undefined,
+                    uploadedBytes: undefined, totalBytes: undefined, speedBytesPerSec: undefined }
+                : i
+        ));
+    };
+
+    const dismissItem = (id: string) => {
+        setUploadQueue(q => q.filter(i => i.id !== id));
+    };
+
     const { isDragging } = useFileDrop();
 
     return {
@@ -162,6 +207,9 @@ export function useFileUpload(activeFolderId: number | null, store: Store | null
         setUploadQueue,
         handleManualUpload,
         cancelAll,
+        cancelItem,
+        retryItem,
+        dismissItem,
         isDragging
     };
 }

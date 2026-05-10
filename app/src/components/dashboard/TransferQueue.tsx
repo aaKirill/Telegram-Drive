@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
-import { ArrowDown, ArrowUp, AlertCircle, Check, X } from "lucide-react";
+import { ArrowDown, ArrowUp, AlertCircle, Check, X, RotateCw } from "lucide-react";
 import { QueueItem, DownloadItem } from "../../types";
+import { formatBytes } from "../../utils";
 
 interface TransferQueueProps {
     uploads: QueueItem[];
@@ -9,7 +10,12 @@ interface TransferQueueProps {
     onCancelAllUploads: () => void;
     onClearDownloads: () => void;
     onCancelAllDownloads: () => void;
+    onDismissUpload?: (id: string) => void;
+    onCancelUpload?: (id: string) => void;
+    onRetryUpload?: (id: string) => void;
     onDismissDownload?: (id: string) => void;
+    onCancelDownload?: (id: string) => void;
+    onRetryDownload?: (id: string) => void;
 }
 
 // Single floating panel that merges Uploads + Downloads — replaces the two
@@ -21,7 +27,8 @@ export function TransferQueue({
     uploads, downloads,
     onClearUploads, onCancelAllUploads,
     onClearDownloads, onCancelAllDownloads,
-    onDismissDownload,
+    onDismissUpload, onCancelUpload, onRetryUpload,
+    onDismissDownload, onCancelDownload, onRetryDownload,
 }: TransferQueueProps) {
     const total = uploads.length + downloads.length;
 
@@ -82,14 +89,24 @@ export function TransferQueue({
                     <Section title="Uploads" count={uploads.length} active={upCount}>
                         {uploads.map((item) => {
                             const filename = item.path.split('/').pop() ?? item.path;
+                            const status = item.status === 'uploading' ? 'active' : item.status;
+                            const cancellable = onCancelUpload && (item.status === 'pending' || item.status === 'uploading');
+                            const retryable = onRetryUpload && (item.status === 'error' || item.status === 'cancelled');
+                            const dismissable = onDismissUpload && (item.status === 'error' || item.status === 'cancelled' || item.status === 'success');
                             return (
                                 <Row
                                     key={`u-${item.id}`}
                                     direction="up"
                                     filename={filename}
-                                    status={item.status === 'uploading' ? 'active' : item.status}
+                                    status={status}
                                     progress={item.progress}
+                                    uploadedBytes={item.uploadedBytes}
+                                    totalBytes={item.totalBytes}
+                                    speedBytesPerSec={item.speedBytesPerSec}
                                     error={item.error}
+                                    onCancel={cancellable ? () => onCancelUpload!(item.id) : undefined}
+                                    onRetry={retryable ? () => onRetryUpload!(item.id) : undefined}
+                                    onDismiss={dismissable ? () => onDismissUpload!(item.id) : undefined}
                                 />
                             );
                         })}
@@ -98,15 +115,23 @@ export function TransferQueue({
                 {downloads.length > 0 && (
                     <Section title="Downloads" count={downloads.length} active={dnCount}>
                         {downloads.map((item) => {
+                            const status = item.status === 'downloading' ? 'active' : item.status;
+                            const cancellable = onCancelDownload && (item.status === 'pending' || item.status === 'downloading');
+                            const retryable = onRetryDownload && (item.status === 'error' || item.status === 'cancelled');
                             const dismissable = onDismissDownload && (item.status === 'error' || item.status === 'cancelled' || item.status === 'success');
                             return (
                                 <Row
                                     key={`d-${item.id}`}
                                     direction="down"
                                     filename={item.filename}
-                                    status={item.status === 'downloading' ? 'active' : item.status}
+                                    status={status}
                                     progress={item.progress}
+                                    uploadedBytes={item.uploadedBytes}
+                                    totalBytes={item.totalBytes}
+                                    speedBytesPerSec={item.speedBytesPerSec}
                                     error={item.error}
+                                    onCancel={cancellable ? () => onCancelDownload!(item.id) : undefined}
+                                    onRetry={retryable ? () => onRetryDownload!(item.id) : undefined}
                                     onDismiss={dismissable ? () => onDismissDownload!(item.id) : undefined}
                                 />
                             );
@@ -132,14 +157,20 @@ function Section({ title, count, active, children }: { title: string; count: num
     );
 }
 
-function Row({ direction, filename, status, progress, error, onDismiss }: {
+function Row({ direction, filename, status, progress, uploadedBytes, totalBytes, speedBytesPerSec, error, onCancel, onRetry, onDismiss }: {
     direction: 'up' | 'down';
     filename: string;
     status: 'pending' | 'active' | 'success' | 'error' | 'cancelled';
     progress?: number;
+    uploadedBytes?: number;
+    totalBytes?: number;
+    speedBytesPerSec?: number;
     error?: string;
+    onCancel?: () => void;
+    onRetry?: () => void;
     onDismiss?: () => void;
 }) {
+    const showBytes = status === 'active' && totalBytes !== undefined && totalBytes > 0;
     return (
         <div className="flex flex-col gap-1 p-2 bg-telegram-hover rounded">
             <div className="flex items-center gap-2 text-sm">
@@ -152,8 +183,29 @@ function Row({ direction, filename, status, progress, error, onDismiss }: {
                 )}
                 {status === 'cancelled' && <div className="text-xs text-gray-400">Cancelled</div>}
                 {status === 'error' && <div className="text-xs text-red-400">Error</div>}
+                {onRetry && (
+                    <button
+                        type="button"
+                        onClick={onRetry}
+                        className="flex-shrink-0 p-0.5 rounded text-telegram-subtext hover:text-telegram-primary hover:bg-telegram-border transition-colors"
+                        title="Retry"
+                    >
+                        <RotateCw className="w-3.5 h-3.5" />
+                    </button>
+                )}
+                {onCancel && (
+                    <button
+                        type="button"
+                        onClick={onCancel}
+                        className="flex-shrink-0 p-0.5 rounded text-telegram-subtext hover:text-red-400 hover:bg-telegram-border transition-colors"
+                        title="Cancel"
+                    >
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                )}
                 {onDismiss && (
                     <button
+                        type="button"
                         onClick={onDismiss}
                         className="flex-shrink-0 p-0.5 rounded text-telegram-subtext hover:text-telegram-text hover:bg-telegram-border transition-colors"
                         title="Dismiss"
@@ -171,6 +223,14 @@ function Row({ direction, filename, status, progress, error, onDismiss }: {
                         />
                     ) : (
                         <div className={`h-full w-full animate-progress-indeterminate ${direction === 'up' ? 'bg-blue-500' : 'bg-telegram-secondary'}`} />
+                    )}
+                </div>
+            )}
+            {showBytes && (
+                <div className="flex items-center gap-2 text-[11px] font-mono text-telegram-subtext">
+                    <span>{formatBytes(uploadedBytes ?? 0)} / {formatBytes(totalBytes!)}</span>
+                    {speedBytesPerSec !== undefined && speedBytesPerSec > 0 && (
+                        <span className="text-telegram-subtext/70">· {formatBytes(speedBytesPerSec)}/s</span>
                     )}
                 </div>
             )}
