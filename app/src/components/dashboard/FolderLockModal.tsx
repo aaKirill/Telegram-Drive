@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { invoke } from '../../lib/transport';
 import { Lock, AlertTriangle, X } from 'lucide-react';
 import { useAppSettings } from '../../hooks/useAppSettings';
@@ -97,9 +98,29 @@ export function FolderLockModal({ mode, folderName, onClose, onSubmit, folderId 
         }
     };
 
-    return (
-        <div className="fixed inset-0 z-[300] bg-black/70 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
-            <div className="bg-telegram-surface rounded-xl border border-telegram-border w-full max-w-sm p-5 shadow-2xl" onClick={e => e.stopPropagation()}>
+    // Portal to document.body so the modal isn't trapped inside the
+    // sidebar's containing block. Tailwind's `transform` utility on the
+    // mobile sidebar makes the aside a containing block for `fixed`
+    // descendants — so without portaling, this modal positions itself
+    // relative to the sidebar (top-left of the drawer) instead of the
+    // viewport.
+    if (typeof document === 'undefined') return null;
+    return createPortal((
+        <div
+            className="fixed inset-0 z-[300] bg-black/70 flex items-center justify-center p-4 backdrop-blur-sm"
+            // 100lvh = "large viewport height" — full screen height even
+            // when the iOS virtual keyboard has shrunk the visual viewport.
+            // Without this, opening a password input shrinks the flex
+            // container so `items-center` re-centers in the smaller area
+            // and the modal jumps up to a corner.
+            style={{ minHeight: '100lvh' }}
+            onClick={onClose}
+        >
+            <div
+                className="bg-telegram-surface rounded-xl border border-telegram-border w-full max-w-sm p-5 shadow-2xl"
+                style={{ touchAction: 'manipulation' }}
+                onClick={e => e.stopPropagation()}
+            >
                 <div className="flex items-start justify-between mb-3">
                     <div className="flex items-center gap-2">
                         <Lock className="w-5 h-5 text-telegram-primary" />
@@ -153,21 +174,25 @@ export function FolderLockModal({ mode, folderName, onClose, onSubmit, folderId 
 
                 <div className="flex gap-2 justify-end">
                     <button
+                        type="button"
                         onClick={onClose}
                         disabled={busy}
-                        className="px-3 py-1.5 text-xs rounded bg-white/5 hover:bg-white/10 text-telegram-text disabled:opacity-50"
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                        className="px-3 py-2 text-sm rounded bg-white/5 hover:bg-white/10 text-telegram-text disabled:opacity-50"
                     >
                         Cancel
                     </button>
                     <button
+                        type="button"
                         onClick={submit}
                         disabled={busy}
-                        className="px-3 py-1.5 text-xs rounded bg-telegram-primary hover:bg-telegram-primary/80 text-white disabled:opacity-50"
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                        className="px-3 py-2 text-sm rounded bg-telegram-primary hover:bg-telegram-primary/80 text-white disabled:opacity-50"
                     >
                         {busy ? '...' : SUBMITS[mode]}
                     </button>
                 </div>
             </div>
         </div>
-    );
+    ), document.body);
 }

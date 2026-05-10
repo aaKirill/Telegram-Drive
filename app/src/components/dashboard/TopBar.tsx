@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { HardDrive, LayoutGrid, Sun, Moon, ListChecks, ListX, Settings as SettingsIcon, Menu, MoreVertical } from 'lucide-react';
+import { HardDrive, LayoutGrid, Sun, Moon, ListChecks, ListX, Settings as SettingsIcon, Menu, MoreVertical, Search, X, CircleCheckBig, Columns3 } from 'lucide-react';
 import { useTheme } from '../../context/ThemeContext';
 
 interface TopBarProps {
@@ -22,6 +22,24 @@ interface TopBarProps {
     /** Mobile-only: hamburger toggles the drawer-mode sidebar. */
     isMobile?: boolean;
     onMobileMenu?: () => void;
+    /** Mobile-only Select mode toggle. When true, taps on cards toggle
+     *  selection (instead of preview); when false, taps preview. */
+    selectMode?: boolean;
+    onToggleSelectMode?: () => void;
+    /** Desktop-only grid-columns control. Mobile is fixed at 3 cols. */
+    gridColumns?: number;
+    onGridColumnsChange?: (n: number) => void;
+    /** Mobile-only sort + filter controls live inside the kebab. Single
+     *  source of truth so the desktop sidebar/header can reuse them.
+     *  field+direction match the existing Settings keys (defaultSortField
+     *  / defaultSortDir) so both share the same type. */
+    sortField?: 'name' | 'size' | 'date';
+    sortDirection?: 'asc' | 'desc';
+    onSortChange?: (field: 'name' | 'size' | 'date', direction: 'asc' | 'desc') => void;
+    /** Single-select filter for mobile (vs. the Set<ConcreteCategory> the
+     *  desktop FileExplorer chrome offers). 'all' = no filter. */
+    mobileFilter?: 'all' | 'image' | 'video' | 'audio' | 'document' | 'other';
+    onMobileFilterChange?: (next: 'all' | 'image' | 'video' | 'audio' | 'document' | 'other') => void;
 }
 
 export function TopBar({
@@ -29,11 +47,19 @@ export function TopBar({
     onDownloadFolder, onStartClick, onSelectAll, onDeselectAll, onOpenSettings, hasFiles, totalFiles,
     viewMode, setViewMode, searchTerm, onSearchChange,
     isMobile = false, onMobileMenu,
+    selectMode = false, onToggleSelectMode,
+    gridColumns, onGridColumnsChange,
+    sortField, sortDirection, onSortChange,
+    mobileFilter = 'all', onMobileFilterChange,
 }: TopBarProps) {
     const allSelected = hasFiles && selectedIds.length >= totalFiles && totalFiles > 0;
     const { theme, toggleTheme } = useTheme();
     const [overflowOpen, setOverflowOpen] = useState(false);
+    const [searchOpen, setSearchOpen] = useState(false);
+    const [colsOpen, setColsOpen] = useState(false);
     const overflowRef = useRef<HTMLDivElement>(null);
+    const colsRef = useRef<HTMLDivElement>(null);
+    const searchInputRef = useRef<HTMLInputElement>(null);
 
     // Click-outside dismissal for the kebab menu. touchstart covers iOS
     // taps on areas that don't synthesize a click event.
@@ -52,12 +78,64 @@ export function TopBar({
         };
     }, [overflowOpen]);
 
+    // Same dismiss logic for the columns dropdown (desktop-only).
+    useEffect(() => {
+        if (!colsOpen) return;
+        const onOutside = (e: Event) => {
+            if (colsRef.current && !colsRef.current.contains(e.target as Node)) {
+                setColsOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onOutside);
+        return () => document.removeEventListener('mousedown', onOutside);
+    }, [colsOpen]);
+
+    // Auto-focus the search input when the user opens it on mobile,
+    // and clear the term on close so the next open starts fresh.
+    useEffect(() => {
+        if (searchOpen) {
+            setTimeout(() => searchInputRef.current?.focus(), 50);
+        }
+    }, [searchOpen]);
+
+    // Mobile search-expanded mode replaces the whole topbar with a single
+    // input + close button so the user gets an unambiguous "search" surface
+    // when there's no room for an inline input next to everything else.
+    if (isMobile && searchOpen) {
+        return (
+            <header className="border-b border-telegram-border flex items-center px-2 gap-2 bg-telegram-surface/95 backdrop-blur-md sticky top-0 z-10 h-14 safe-top" onClick={e => e.stopPropagation()}>
+                <Search className="w-5 h-5 text-telegram-subtext shrink-0" />
+                <input
+                    ref={searchInputRef}
+                    type="text"
+                    placeholder="Search..."
+                    className="flex-1 bg-transparent text-sm text-telegram-text placeholder:text-telegram-subtext focus:outline-none"
+                    value={searchTerm}
+                    onChange={(e) => onSearchChange(e.target.value)}
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                />
+                <button
+                    type="button"
+                    onClick={() => { setSearchOpen(false); onSearchChange(''); }}
+                    style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                    className="p-2 -mr-1 hover:bg-telegram-hover rounded-md text-telegram-subtext hover:text-telegram-text transition shrink-0"
+                    aria-label="Close search"
+                >
+                    <X className="w-5 h-5" />
+                </button>
+            </header>
+        );
+    }
+
     return (
-        <header className="h-14 border-b border-telegram-border flex items-center px-2 sm:px-4 justify-between bg-telegram-surface/80 backdrop-blur-md sticky top-0 z-10" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center gap-2 min-w-0">
+        <header className="border-b border-telegram-border flex items-center px-2 sm:px-4 justify-between bg-telegram-surface/80 backdrop-blur-md sticky top-0 z-10 h-14 md:h-14 safe-top" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-1 sm:gap-2 min-w-0">
                 {isMobile && (
                     <button
                         onClick={onMobileMenu}
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
                         className="p-2 hover:bg-telegram-hover rounded-md text-telegram-subtext hover:text-telegram-text transition shrink-0"
                         title="Open menu"
                         aria-label="Open menu"
@@ -83,18 +161,23 @@ export function TopBar({
                 </div>
             </div>
 
-            <div className="flex-1 max-w-md mx-2 sm:mx-4 min-w-0">
-                <input
-                    type="text"
-                    placeholder="Search..."
-                    className="w-full bg-telegram-hover border border-telegram-border rounded-lg px-3 py-1.5 text-sm text-telegram-text placeholder:text-telegram-subtext focus:outline-none focus:border-telegram-primary/50 transition-colors"
-                    value={searchTerm}
-                    onChange={(e) => onSearchChange(e.target.value)}
-                    autoCorrect="off"
-                    autoCapitalize="off"
-                    spellCheck={false}
-                />
-            </div>
+            {/* Inline search — desktop only. Mobile uses the search-icon
+                expand-to-fullbar pattern (rendered above and via the button
+                in the right-hand cluster). */}
+            {!isMobile && (
+                <div className="flex-1 max-w-md mx-2 sm:mx-4 min-w-0">
+                    <input
+                        type="text"
+                        placeholder="Search..."
+                        className="w-full bg-telegram-hover border border-telegram-border rounded-lg px-3 py-1.5 text-sm text-telegram-text placeholder:text-telegram-subtext focus:outline-none focus:border-telegram-primary/50 transition-colors"
+                        value={searchTerm}
+                        onChange={(e) => onSearchChange(e.target.value)}
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
+                    />
+                </div>
+            )}
 
             <div className="flex items-center gap-1 sm:gap-2">
                 {/* Bulk-action cluster — desktop only. On mobile it lives in
@@ -111,10 +194,42 @@ export function TopBar({
                     </div>
                 )}
 
-                {hasFiles && (
+                {/* Mobile-only: search icon (expands to fullbar input) and
+                    Select-mode toggle. Hidden on desktop where the inline
+                    search input + click-to-select cover the same actions. */}
+                {isMobile && (
+                    <button
+                        type="button"
+                        onClick={() => setSearchOpen(true)}
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                        className="p-2 hover:bg-telegram-hover rounded-md text-telegram-subtext hover:text-telegram-text transition shrink-0"
+                        title="Search"
+                        aria-label="Search"
+                    >
+                        <Search className="w-5 h-5" />
+                    </button>
+                )}
+
+                {/* Select-mode toggle is mobile-only. Single icon — the
+                    background tint indicates active state (no glyph swap). */}
+                {isMobile && hasFiles && onToggleSelectMode && (
+                    <button
+                        type="button"
+                        onClick={onToggleSelectMode}
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                        className={`p-2 rounded-md transition shrink-0 ${selectMode ? 'bg-telegram-primary/15 text-telegram-primary' : 'hover:bg-telegram-hover text-telegram-subtext hover:text-telegram-text'}`}
+                        title={selectMode ? 'Done' : 'Select'}
+                        aria-label={selectMode ? 'Done selecting' : 'Enter select mode'}
+                    >
+                        <CircleCheckBig className="w-5 h-5" />
+                    </button>
+                )}
+
+                {hasFiles && (!isMobile || selectMode) && (
                     <button
                         onClick={allSelected ? onDeselectAll : onSelectAll}
-                        className="p-2 hover:bg-telegram-hover rounded-md text-telegram-subtext hover:text-telegram-text transition relative group"
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                        className="p-2 hover:bg-telegram-hover rounded-md text-telegram-subtext hover:text-telegram-text transition relative group shrink-0"
                         title={allSelected ? "Deselect All" : "Select All"}
                     >
                         {allSelected ? <ListX className="w-5 h-5" /> : <ListChecks className="w-5 h-5" />}
@@ -146,6 +261,36 @@ export function TopBar({
                                 {viewMode === 'grid' ? 'Switch to List' : 'Switch to Grid'}
                             </span>
                         </button>
+
+                        {viewMode === 'grid' && gridColumns !== undefined && onGridColumnsChange && (
+                            <div className="relative" ref={colsRef}>
+                                <button
+                                    onClick={() => setColsOpen(o => !o)}
+                                    className="p-2 hover:bg-telegram-hover rounded-md text-telegram-subtext hover:text-telegram-text transition relative group"
+                                    title="Grid columns"
+                                    aria-label="Grid columns"
+                                >
+                                    <Columns3 className="w-5 h-5" />
+                                    <span className="absolute -bottom-8 left-1/2 -translate-x-1/2 text-[10px] bg-telegram-surface border border-telegram-border px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-50 shadow-lg">
+                                        {gridColumns} columns
+                                    </span>
+                                </button>
+                                {colsOpen && (
+                                    <div className="absolute right-0 top-full mt-1 w-32 bg-telegram-surface border border-telegram-border rounded-md shadow-xl z-50 py-1 text-sm">
+                                        {[2, 4, 6, 8, 10, 12].map(n => (
+                                            <button
+                                                key={n}
+                                                type="button"
+                                                onClick={() => { onGridColumnsChange(n); setColsOpen(false); }}
+                                                className={`w-full text-left px-3 py-1.5 hover:bg-telegram-hover ${gridColumns === n ? 'text-telegram-primary' : 'text-telegram-text'}`}
+                                            >
+                                                {n} columns
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         <div className="w-px h-6 bg-telegram-border mx-1"></div>
 
@@ -182,7 +327,58 @@ export function TopBar({
                             <MoreVertical className="w-5 h-5" />
                         </button>
                         {overflowOpen && (
-                            <div className="absolute right-0 top-full mt-1 w-52 bg-telegram-surface border border-telegram-border rounded-md shadow-xl z-50 py-1 text-sm">
+                            <div className="absolute right-0 top-full mt-1 w-52 bg-telegram-surface border border-telegram-border rounded-md shadow-xl z-50 py-1 text-xs max-h-[80vh] overflow-y-auto">
+                                {/* Sort — picker stays open while user
+                                    toggles fields (closing instantly on
+                                    every tap would force a re-open per
+                                    change, which is annoying). */}
+                                {sortField && sortDirection && onSortChange && (
+                                    <SubSection label="Sort by">
+                                        {(['name', 'size', 'date'] as const).map((f) => {
+                                            const active = sortField === f;
+                                            return (
+                                                <button
+                                                    key={f}
+                                                    type="button"
+                                                    onClick={() => {
+                                                        onSortChange(f, active ? (sortDirection === 'asc' ? 'desc' : 'asc') : sortDirection);
+                                                    }}
+                                                    className={`w-full px-3 py-1 text-left flex items-center justify-between hover:bg-telegram-hover ${active ? 'text-telegram-primary' : 'text-telegram-text'}`}
+                                                >
+                                                    <span className="capitalize">{f}</span>
+                                                    {active && <span className="text-[10px]">{sortDirection === 'asc' ? '↑' : '↓'}</span>}
+                                                </button>
+                                            );
+                                        })}
+                                    </SubSection>
+                                )}
+
+                                {/* Filter — single-select for mobile. */}
+                                {onMobileFilterChange && (
+                                    <SubSection label="Filter">
+                                        {([
+                                            ['all', 'All'],
+                                            ['image', 'Images'],
+                                            ['video', 'Videos'],
+                                            ['audio', 'Audio'],
+                                            ['document', 'Documents'],
+                                            ['other', 'Other'],
+                                        ] as const).map(([v, lbl]) => {
+                                            const active = mobileFilter === v;
+                                            return (
+                                                <button
+                                                    key={v}
+                                                    type="button"
+                                                    onClick={() => onMobileFilterChange(v)}
+                                                    className={`w-full px-3 py-1 text-left hover:bg-telegram-hover ${active ? 'text-telegram-primary' : 'text-telegram-text'}`}
+                                                >
+                                                    {lbl}
+                                                </button>
+                                            );
+                                        })}
+                                    </SubSection>
+                                )}
+
                                 <MenuRow
                                     icon={<HardDrive className="w-4 h-4" />}
                                     label="Download Folder"
@@ -216,11 +412,23 @@ export function TopBar({
 function MenuRow({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
     return (
         <button
+            type="button"
             onClick={onClick}
-            className="w-full flex items-center gap-3 px-3 py-2 hover:bg-telegram-hover text-telegram-text text-left"
+            className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-telegram-hover text-telegram-text text-left"
         >
-            <span className="text-telegram-subtext">{icon}</span>
-            <span>{label}</span>
+            <span className="text-telegram-subtext shrink-0">{icon}</span>
+            <span className="truncate">{label}</span>
         </button>
+    );
+}
+
+function SubSection({ label, children }: { label: string; children: React.ReactNode }) {
+    return (
+        <div className="border-b border-telegram-border last:border-b-0">
+            <div className="px-3 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wide text-telegram-subtext/80">
+                {label}
+            </div>
+            {children}
+        </div>
     );
 }

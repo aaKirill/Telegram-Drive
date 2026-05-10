@@ -9,6 +9,7 @@ import * as folders from "./folders";
 import * as files from "./files";
 import * as locks from "./locks";
 import * as sync from "./sync";
+import * as bandwidth from "./bandwidth";
 
 type Handler = (args: Record<string, unknown> | undefined) => Promise<unknown> | unknown;
 
@@ -62,7 +63,7 @@ const HANDLERS: Record<string, Handler> = {
       a?.sourceFolderId == null ? null : Number(a.sourceFolderId),
       a?.targetFolderId == null ? null : Number(a.targetFolderId),
     ),
-  cmd_get_bandwidth: () => ({ uploaded: 0, downloaded: 0 }),
+  cmd_get_bandwidth: () => bandwidth.getStats(),
 
   cmd_upload_file: (a) =>
     files.uploadFile(
@@ -83,7 +84,10 @@ const HANDLERS: Record<string, Handler> = {
     files.getPreview(Number(a?.messageId), a?.folderId == null ? null : Number(a.folderId)),
   cmd_get_media_url: (a) =>
     files.getMediaUrl(Number(a?.messageId), a?.folderId == null ? null : Number(a.folderId)),
-  cmd_open_path: (a) => files.openPath(String(a?.path ?? "")),
+  cmd_open_path: (a) => files.openPath(
+    String(a?.path ?? ""),
+    a?.filename != null ? String(a.filename) : undefined,
+  ),
   cmd_get_stream_info: () => files.getStreamInfo(),
   cmd_cancel_transfer: (a) => { files.cancelTransfer(String(a?.transferId ?? "")); return true; },
 

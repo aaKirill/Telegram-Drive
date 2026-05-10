@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { HardDrive, Folder, FolderLock, FolderOpen, Plus, RefreshCw, LogOut, Eye, EyeOff } from 'lucide-react';
 import { SidebarItem } from './SidebarItem';
 import { BandwidthWidget } from './BandwidthWidget';
@@ -100,12 +101,22 @@ export function Sidebar({
         }
     };
 
-    const visibleFolders = useMemo(() => {
-        // Always strip hidden folders — they're managed from Settings only.
-        const notHidden = folders.filter(f => !hiddenFolderIds.has(f.id));
-        if (showLocked) return notHidden;
-        return notHidden.filter(f => !locks.lockedKeys.has(folderKey(f.id)));
-    }, [folders, hiddenFolderIds, showLocked, locks.lockedKeys]);
+    // Top section: every visible un-locked folder. The locked folders go
+    // in their own group below the divider when the user toggles "Show
+    // locked" so they read as a clearly separate, password-gated set
+    // rather than getting silently appended to the main list.
+    const visibleFolders = useMemo(
+        () => folders.filter(f =>
+            !hiddenFolderIds.has(f.id) && !locks.lockedKeys.has(folderKey(f.id))
+        ),
+        [folders, hiddenFolderIds, locks.lockedKeys],
+    );
+    const lockedFolders = useMemo(
+        () => folders.filter(f =>
+            !hiddenFolderIds.has(f.id) && locks.lockedKeys.has(folderKey(f.id))
+        ),
+        [folders, hiddenFolderIds, locks.lockedKeys],
+    );
 
     const lockStateOf = (folderId: number | null): 'none' | 'unlocked' | 'locked' => {
         const key = folderKey(folderId);
@@ -205,6 +216,21 @@ export function Sidebar({
                     alt="Logo"
                 />
                 <span className="font-bold text-lg text-telegram-text tracking-tight">Telegram Drive</span>
+                {/* Create-folder button lives next to the title so it's
+                    visually anchored to the sidebar identity rather than
+                    floating in dead space at the bottom of the folder list. */}
+                {!showNewFolderInput && (
+                    <button
+                        type="button"
+                        onClick={() => setShowNewFolderInput(true)}
+                        title="Create folder"
+                        aria-label="Create folder"
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                        className="ml-auto w-7 h-7 flex items-center justify-center rounded-md bg-telegram-primary/10 text-telegram-primary hover:bg-telegram-primary/20 active:bg-telegram-primary/25 transition-colors"
+                    >
+                        <Plus className="w-4 h-4" strokeWidth={2.5} />
+                    </button>
+                )}
             </div>
 
             {hiddenLockCount > 0 && (
@@ -221,6 +247,53 @@ export function Sidebar({
             )}
 
             <nav className="flex-1 px-2 py-4 space-y-1 overflow-y-auto min-h-0">
+                {/* Locked section sits at the very top so the password-gated
+                    set is visually first when the user toggles "Show locked".
+                    Saved Messages and the regular folder list follow below. */}
+                <AnimatePresence initial={false}>
+                    {showLocked && lockedFolders.length > 0 && (
+                        <motion.div
+                            key="locked-section"
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: 'auto' }}
+                            exit={{ opacity: 0, height: 0 }}
+                            transition={{ duration: 0.2, ease: 'easeOut' }}
+                            className="overflow-hidden"
+                        >
+                            <div className="px-3 pt-1 pb-1 text-[10px] uppercase tracking-wide text-telegram-subtext/70">
+                                Locked
+                            </div>
+                            <div className="space-y-1 mb-2 pb-2 border-b border-telegram-border">
+                                {lockedFolders.map((folder, idx) => {
+                                    const state = lockStateOf(folder.id);
+                                    const isActive = selection.kind === 'folder' && selection.id === folder.id && state !== 'locked';
+                                    return (
+                                        <motion.div
+                                            key={folder.id}
+                                            initial={{ opacity: 0, x: -10 }}
+                                            animate={{ opacity: 1, x: 0 }}
+                                            transition={{ duration: 0.18, delay: idx * 0.025 }}
+                                        >
+                                            <SidebarItem
+                                                icon={state === 'locked' ? FolderLock : FolderOpen}
+                                                label={folder.name}
+                                                active={isActive}
+                                                onClick={() => handleFolderClick(folder.id)}
+                                                onDrop={(e: React.DragEvent) => onDrop(e, folder.id)}
+                                                onDelete={() => onDelete(folder.id, folder.name)}
+                                                folderId={folder.id}
+                                                onManagePassword={() => openManageAction(folder.id, folder.name)}
+                                                onLockNow={() => lockNow(folder.id)}
+                                                lockState={state}
+                                            />
+                                        </motion.div>
+                                    );
+                                })}
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
                 {showSavedMessages && (
                     <SidebarItem
                         icon={savedMessagesState === 'locked' ? FolderLock : savedMessagesState === 'unlocked' ? FolderOpen : HardDrive}
@@ -234,6 +307,7 @@ export function Sidebar({
                         lockState={savedMessagesState}
                     />
                 )}
+
                 {visibleFolders.map(folder => {
                     const state = lockStateOf(folder.id);
                     const isActive = selection.kind === 'folder' && selection.id === folder.id && state !== 'locked';
@@ -324,10 +398,11 @@ export function Sidebar({
                         </div>
                     );
                 })}
+
             </nav>
 
-            <div className="px-2 pb-2 border-b border-telegram-border">
-                {showNewFolderInput ? (
+            {showNewFolderInput && (
+                <div className="px-2 pb-2 border-b border-telegram-border">
                     <div className="px-3 py-2 space-y-1.5">
                         <input
                             autoFocus
@@ -372,6 +447,7 @@ export function Sidebar({
                         </label>
                         <div className="flex gap-1.5 pt-0.5">
                             <button
+                                type="button"
                                 onClick={submitCreate}
                                 disabled={!newFolderName.trim() || creating}
                                 className="flex-1 px-2 py-1 rounded text-xs font-medium bg-telegram-primary/20 hover:bg-telegram-primary/30 text-telegram-primary transition disabled:opacity-50 disabled:cursor-not-allowed"
@@ -379,6 +455,7 @@ export function Sidebar({
                                 {creating ? 'Creating…' : 'Create'}
                             </button>
                             <button
+                                type="button"
                                 onClick={resetCreateForm}
                                 disabled={creating}
                                 className="px-2 py-1 rounded text-xs text-telegram-subtext hover:text-telegram-text hover:bg-telegram-hover transition disabled:opacity-50"
@@ -387,16 +464,8 @@ export function Sidebar({
                             </button>
                         </div>
                     </div>
-                ) : (
-                    <button
-                        onClick={() => setShowNewFolderInput(true)}
-                        className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-telegram-subtext hover:bg-telegram-hover hover:text-telegram-text transition-colors border border-dashed border-telegram-border"
-                    >
-                        <Plus className="w-4 h-4" />
-                        Create Folder
-                    </button>
-                )}
-            </div>
+                </div>
+            )}
 
             <div className="p-4 border-t border-telegram-border">
                 <div className="flex items-center gap-2 text-telegram-subtext text-xs">

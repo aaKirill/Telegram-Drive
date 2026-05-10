@@ -71,17 +71,85 @@ fn thumb_download_semaphore() -> &'static tokio::sync::Semaphore {
 /// Replaces the JS-side openExternal/shell.open call which is restricted
 /// to URL schemes by tauri-plugin-shell's default scope regex.
 #[tauri::command]
-pub fn cmd_open_path(app_handle: tauri::AppHandle, path: String) -> Result<(), String> {
+pub fn cmd_open_path(
+    app_handle: tauri::AppHandle,
+    path: String,
+    filename: Option<String>,
+) -> Result<(), String> {
+    let _ = filename; // Web-only hint, ignored on desktop.
+    let _ = &app_handle;
     let exists = std::path::Path::new(&path).exists();
     log::info!("cmd_open_path invoked: path={} exists={}", path, exists);
-    match app_handle.opener().open_path(&path, None::<&str>) {
-        Ok(()) => {
-            log::info!("cmd_open_path: opener returned Ok for {}", path);
-            Ok(())
+    if !exists {
+        return Err(format!("file does not exist: {}", path));
+    }
+
+    // The tauri-plugin-opener `open_path` was returning Ok without
+    // actually launching the OS file association — likely because its
+    // internal URL construction misbehaves with cache paths that
+    // contain spaces / double-underscores. Drop down to the native
+    // shell command per platform; it's a one-line process spawn and
+    // gives us a real exit status to surface back to the user.
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let status = Command::new("open").arg(&path).status();
+        if let Ok(s) = &status {
+            if s.success() {
+                log::info!("cmd_open_path: `open` succeeded for {}", path);
+                return Ok(());
+            }
         }
-        Err(e) => {
-            log::error!("cmd_open_path: opener failed for {}: {}", path, e);
-            Err(e.to_string())
+        // No app claims the file (`kLSApplicationNotFoundErr`) — typical
+        // for niche extensions like `.pages` when iWork isn't installed.
+        // Falling back to `open -R` reveals the file in Finder so the
+        // user can right-click → Open With, drag it elsewhere, or send
+        // it to a different machine. Leaving the error opaque ("Open
+        // failed: open exited with status 1") was useless for them.
+        log::warn!("cmd_open_path: no default app — revealing in Finder instead");
+        let reveal = Command::new("open").arg("-R").arg(&path).status();
+        return match reveal {
+            Ok(s) if s.success() => {
+                Err("No app is installed to open this file. Showing it in Finder.".to_string())
+            }
+            _ => {
+                let original = match status {
+                    Ok(s) => format!("open exited with {}", s),
+                    Err(e) => format!("failed to spawn open: {}", e),
+                };
+                log::error!("cmd_open_path: reveal also failed; original error: {}", original);
+                Err(original)
+            }
+        };
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let status = Command::new("cmd").args(["/C", "start", "", &path]).status();
+        return match status {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(format!("start exited with {}", s)),
+            Err(e) => Err(format!("failed to spawn start: {}", e)),
+        };
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        let status = Command::new("xdg-open").arg(&path).status();
+        return match status {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(format!("xdg-open exited with {}", s)),
+            Err(e) => Err(format!("failed to spawn xdg-open: {}", e)),
+        };
+    }
+
+    #[allow(unreachable_code)]
+    {
+        match app_handle.opener().open_path(&path, None::<&str>) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(e.to_string()),
         }
     }
 }
@@ -91,6 +159,33 @@ const PREVIEW_CACHE_MAX_TOTAL_BYTES: u64 = 80 * 1024 * 1024;
 
 /// Parse the seconds-to-wait out of a grammers FLOOD_WAIT error string.
 /// Returns Some(secs) if matched, capped at 30s to avoid stalling the UI.
+/// Strip filesystem-unsafe characters from a Telegram-supplied filename so
+/// it can be appended to a cache path. Replaces path separators and
+/// shell-meta characters with `_`; preserves dots and unicode letters.
+/// Caps length at 96 chars so we don't blow past path limits with a
+/// pathological filename.
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' | '\n' | '\r' | '\t' => '_',
+            _ => c,
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    if trimmed.is_empty() {
+        return String::from("file");
+    }
+    if trimmed.chars().count() > 96 {
+        // Keep the tail (which usually carries the extension) by chopping
+        // from the front. Take last 96 chars by char count, not byte.
+        let chars: Vec<char> = trimmed.chars().collect();
+        let start = chars.len() - 96;
+        return chars[start..].iter().collect();
+    }
+    trimmed.to_string()
+}
+
 fn parse_flood_wait_secs(err: &str) -> Option<u64> {
     if !err.contains("FLOOD_WAIT") { return None; }
     let idx = err.find("value:")?;
@@ -437,6 +532,14 @@ pub async fn cmd_get_preview(
         if let Some(media) = msg.media() {
             let ext = match &media {
                 Media::Document(d) => {
+                    // Prefer the document's own filename extension — that's
+                    // what other clients (and the OS app launcher) use for
+                    // file-type association. Fall back to a mime → ext map
+                    // covering the common cases telegram clients upload as
+                    // generic application/* with no filename. Without a
+                    // mapping for iWork / Office types, .pages and friends
+                    // were being saved as `.bin` and macOS's "Open with"
+                    // refused to find Pages.app.
                     let mut e = std::path::Path::new(d.name())
                         .extension()
                         .map(|s| s.to_string_lossy().to_string())
@@ -444,11 +547,46 @@ pub async fn cmd_get_preview(
                     if e.is_empty() {
                         if let Some(mime) = d.mime_type() {
                             e = match mime {
-                                "image/jpeg" => "jpg".to_string(),
-                                "image/png" => "png".to_string(),
-                                "video/mp4" => "mp4".to_string(),
-                                _ => "bin".to_string(),
-                            };
+                                "image/jpeg" => "jpg",
+                                "image/png" => "png",
+                                "image/gif" => "gif",
+                                "image/webp" => "webp",
+                                "image/heic" | "image/heif" => "heic",
+                                "video/mp4" => "mp4",
+                                "video/quicktime" => "mov",
+                                "video/x-matroska" => "mkv",
+                                "video/webm" => "webm",
+                                "audio/mpeg" => "mp3",
+                                "audio/ogg" => "ogg",
+                                "audio/mp4" | "audio/x-m4a" => "m4a",
+                                "audio/flac" | "audio/x-flac" => "flac",
+                                "audio/wav" | "audio/x-wav" => "wav",
+                                "application/pdf" => "pdf",
+                                "application/zip" => "zip",
+                                "application/x-rar-compressed" | "application/vnd.rar" => "rar",
+                                "application/x-7z-compressed" => "7z",
+                                "application/gzip" => "gz",
+                                "application/x-tar" => "tar",
+                                // iWork bundles — Telegram serves these as the
+                                // application/zip bundle's actual mime, since
+                                // they're zip archives at heart. Map both.
+                                "application/x-iwork-pages-sffpages" | "application/vnd.apple.pages" => "pages",
+                                "application/x-iwork-keynote-sffkey" | "application/vnd.apple.keynote" => "key",
+                                "application/x-iwork-numbers-sffnumbers" | "application/vnd.apple.numbers" => "numbers",
+                                // Office Open XML
+                                "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+                                "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+                                "application/msword" => "doc",
+                                "application/vnd.ms-excel" => "xls",
+                                "application/vnd.ms-powerpoint" => "ppt",
+                                "application/epub+zip" => "epub",
+                                "text/plain" => "txt",
+                                "text/markdown" => "md",
+                                "text/csv" => "csv",
+                                "application/json" => "json",
+                                _ => "bin",
+                            }.to_string();
                         } else {
                             e = "bin".to_string();
                         }
@@ -461,7 +599,22 @@ pub async fn cmd_get_preview(
             let folder_key = folder_id
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "home".to_string());
-            let save_path = cache_dir.join(format!("{}_{}.{}", folder_key, message_id, ext));
+            // Cache file naming: when the document carries its own filename,
+            // append it verbatim so the OS app launcher sees the source's
+            // exact extension (e.g. `.pages`, `.pages.zip`, `.docx`). The
+            // single-extension path was losing iWork bundles to `.bin`
+            // whenever the mime didn't match a known case below — falling
+            // back to the document's own filename is more robust than
+            // trying to enumerate every mime type Telegram might serve.
+            let original_name = match &media {
+                Media::Document(d) => d.name().to_string(),
+                _ => String::new(),
+            };
+            let save_path = if !original_name.is_empty() {
+                cache_dir.join(format!("{}_{}__{}", folder_key, message_id, sanitize_filename(&original_name)))
+            } else {
+                cache_dir.join(format!("{}_{}.{}", folder_key, message_id, ext))
+            };
             let save_path_str = save_path.to_string_lossy().to_string();
 
             let cached_len = save_path.metadata().ok().map(|m| m.len()).unwrap_or(0);

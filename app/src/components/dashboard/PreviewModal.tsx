@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { X, File, ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react';
 import { invoke } from '../../lib/transport';
 import { convertFileSrc } from '../../lib/transport';
@@ -210,7 +211,13 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
     // responsive. Vertical-dominant motions are ignored so a user scrolling
     // text inside the modal isn't fighting horizontal nav.
     const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+    const swipedRef = useRef(false);
+    // Track direction of the last navigation so AnimatePresence can slide
+    // the image in from the correct side. +1 = next (slides in from right),
+    // -1 = prev (slides in from left).
+    const [navDir, setNavDir] = useState<1 | -1>(1);
     const onTouchStart = (e: React.TouchEvent) => {
+        swipedRef.current = false;
         if (e.touches.length !== 1) { touchStartRef.current = null; return; }
         touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
     };
@@ -222,50 +229,117 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
         const dx = t.clientX - start.x;
         const dy = t.clientY - start.y;
         if (Math.abs(dx) < 60 || Math.abs(dy) > Math.abs(dx)) return;
-        if (dx > 0) { if (onPrev) onPrev(); } else { if (onNext) onNext(); }
+        // Mark this gesture as a swipe so the trailing tap doesn't close
+        // the modal — without this, every swipe would also fire onClose.
+        swipedRef.current = true;
+        if (dx > 0) { setNavDir(-1); if (onPrev) onPrev(); }
+        else { setNavDir(1); if (onNext) onNext(); }
     };
+    const handleBackdropClick = () => {
+        if (swipedRef.current) {
+            swipedRef.current = false;
+            return;
+        }
+        onClose();
+    };
+
+    // Outer wrapper layout differs between platforms:
+    //   - Mobile: column with top chrome bar above the image. The image
+    //     fills available space below; tap anywhere outside chrome closes.
+    //   - Desktop: centered with a max-width box; backdrop area around
+    //     the image is the close-on-click region (matches the original
+    //     "click outside the picture to dismiss" pattern).
+    const outerClass = isMobile
+        ? "fixed inset-0 z-[150] bg-black/95 flex flex-col items-stretch backdrop-blur-sm"
+        : "fixed inset-0 z-[150] bg-black/95 flex items-center justify-center p-2 sm:p-4 backdrop-blur-sm";
+    const innerClass = isMobile
+        ? "relative flex-1 flex items-center justify-center p-0"
+        : "relative w-full max-w-5xl max-h-screen flex flex-col items-center justify-center";
 
     return (
         <div
-            className="fixed inset-0 z-[150] bg-black/90 flex items-center justify-center p-2 sm:p-4 backdrop-blur-sm"
-            onClick={onClose}
-            onTouchStart={onTouchStart}
-            onTouchEnd={onTouchEnd}
+            className={outerClass}
+            onClick={handleBackdropClick}
+            // Mobile uses framer-motion drag on the image element itself
+            // (drag-to-scrub with snap-back), so the outer-level swipe
+            // detector here is desktop-only. Without that gate, the two
+            // would race: framer's onDragEnd would fire navigation, and
+            // touchend on the wrapper would fire it again.
+            onTouchStart={isMobile ? undefined : onTouchStart}
+            onTouchEnd={isMobile ? undefined : onTouchEnd}
         >
+            {/* Mobile chrome strip — sits above the image so the filename
+                and close button never sit on top of the image content. */}
+            {isMobile && (
+                <div
+                    className="flex items-center gap-2 px-3 h-12 bg-black/60 border-b border-white/10 safe-top shrink-0"
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        className="p-2 -ml-2 rounded-md text-white/80 hover:text-white active:bg-white/10 transition"
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                        aria-label="Close"
+                    >
+                        <X className="w-5 h-5" />
+                    </button>
+                    <div className="flex-1 min-w-0 text-white text-sm truncate" title={file.name}>
+                        {file.name}
+                    </div>
+                    {typeof currentIndex === 'number' && typeof totalItems === 'number' && totalItems > 0 && (
+                        <div className="text-white/60 text-xs shrink-0 tabular-nums">
+                            {currentIndex + 1}/{totalItems}
+                        </div>
+                    )}
+                </div>
+            )}
+
             <div
-                className="relative w-full max-w-5xl max-h-screen flex flex-col items-center justify-center"
-                // On mobile, don't trap clicks in the inner card so a tap
-                // anywhere (including the image itself) reaches the outer
-                // backdrop's `onClick={onClose}`. Each button below
-                // stops propagation individually to keep nav working.
-                onClick={isMobile ? undefined : (e) => e.stopPropagation()}
+                className={innerClass}
+                // Don't trap clicks. Buttons inside (chevrons, X, "Open
+                // with system app") all stopPropagation in their own
+                // handlers, so a tap on empty space — including on the
+                // image itself — bubbles up to the outer onClose. This
+                // matches user expectation: clicking the image dismisses
+                // the preview, not just the surrounding void.
             >
                 <button
-                    onClick={(e) => { e.stopPropagation(); if (onPrev) onPrev(); }}
-                    className="absolute left-1 sm:left-2 top-1/2 -translate-y-1/2 p-2 bg-black/60 hover:bg-black/80 rounded-full transition-colors z-10"
-                    style={{ color: '#ffffff' }}
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setNavDir(-1); if (onPrev) onPrev(); }}
+                    className="absolute left-1 sm:left-2 top-1/2 -translate-y-1/2 p-2 bg-black/50 hover:bg-black/80 rounded-full transition-colors z-10"
+                    style={{ color: '#ffffff', touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
                     title="Previous (ArrowLeft / J)"
+                    aria-label="Previous"
                 >
                     <ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" />
                 </button>
 
                 <button
-                    onClick={(e) => { e.stopPropagation(); if (onNext) onNext(); }}
-                    className="absolute right-1 sm:right-2 top-1/2 -translate-y-1/2 p-2 bg-black/60 hover:bg-black/80 rounded-full transition-colors z-10"
-                    style={{ color: '#ffffff' }}
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setNavDir(1); if (onNext) onNext(); }}
+                    className="absolute right-1 sm:right-2 top-1/2 -translate-y-1/2 p-2 bg-black/50 hover:bg-black/80 rounded-full transition-colors z-10"
+                    style={{ color: '#ffffff', touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
                     title="Next (ArrowRight / L)"
+                    aria-label="Next"
                 >
                     <ChevronRight className="w-5 h-5 sm:w-6 sm:h-6" />
                 </button>
 
-                <button
-                    onClick={onClose}
-                    className="absolute top-2 right-2 sm:-top-12 sm:right-0 p-2 bg-black/60 hover:bg-black/80 rounded-full transition-colors z-10"
-                    style={{ color: '#ffffff' }}
-                    aria-label="Close"
-                >
-                    <X className="w-5 h-5 sm:w-6 sm:h-6" />
-                </button>
+                {/* Desktop close button — outside the centered viewing area
+                    so it doesn't crowd the image. Mobile uses the top bar
+                    rendered above. */}
+                {!isMobile && (
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        className="absolute top-2 right-2 sm:-top-12 sm:right-0 p-2 bg-black/60 hover:bg-black/80 rounded-full transition-colors z-10"
+                        style={{ color: '#ffffff' }}
+                        aria-label="Close"
+                    >
+                        <X className="w-5 h-5 sm:w-6 sm:h-6" />
+                    </button>
+                )}
 
                 {loading && (
                     <div className="flex flex-col items-center gap-4 text-white">
@@ -283,25 +357,82 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
                 )}
 
                 {!loading && !error && (src || !isImageFile(file.name)) && (
-                    <div className="flex flex-col items-center">
+                    <div className="flex flex-col items-center max-h-full">
                         {isImageFile(file.name) && src ? (
-                            <img
-                                src={src}
-                                className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl bg-black"
-                                alt="Preview"
-                                onError={() => {
-                                    const key = getPreviewCacheKey(file.id, effectiveFolderId(file, activeFolderId));
-                                    forgetPreview(key);
+                            isMobile ? (
+                                // Mobile: drag-to-scrub. Image follows the
+                                // finger horizontally; on release, if the
+                                // user dragged past the threshold, commit
+                                // the nav (motion.div snaps back to 0
+                                // because dragConstraints left=right=0).
+                                // The new image fades in via the variant
+                                // wrapper below.
+                                <motion.img
+                                    key={file.id}
+                                    src={src}
+                                    draggable={false}
+                                    drag="x"
+                                    dragConstraints={{ left: 0, right: 0 }}
+                                    dragElastic={0.6}
+                                    dragMomentum={false}
+                                    onDragEnd={(_, info) => {
+                                        const dx = info.offset.x;
+                                        if (Math.abs(dx) < 60) return;
+                                        // Mark as a swipe so the trailing
+                                        // tap doesn't also fire onClose.
+                                        swipedRef.current = true;
+                                        if (dx > 0) { setNavDir(-1); onPrev?.(); }
+                                        else { setNavDir(1); onNext?.(); }
+                                    }}
+                                    initial={{ opacity: 0 }}
+                                    animate={{ opacity: 1 }}
+                                    transition={{ duration: 0.15 }}
+                                    className="max-w-full max-h-full object-contain bg-black"
+                                    alt="Preview"
+                                    onError={() => {
+                                        const key = getPreviewCacheKey(file.id, effectiveFolderId(file, activeFolderId));
+                                        forgetPreview(key);
+                                        if (retryCount < 1) {
+                                            setRetryCount((prev) => prev + 1);
+                                            setReloadNonce((prev) => prev + 1);
+                                            return;
+                                        }
+                                        setError('Failed to render image preview');
+                                    }}
+                                />
+                            ) : (
+                                <AnimatePresence mode="popLayout" initial={false} custom={navDir}>
+                                    <motion.img
+                                        key={file.id}
+                                        src={src}
+                                        draggable={false}
+                                        custom={navDir}
+                                        variants={{
+                                            enter: (d: number) => ({ x: d * 60, opacity: 0 }),
+                                            center: { x: 0, opacity: 1 },
+                                            exit: (d: number) => ({ x: -d * 60, opacity: 0 }),
+                                        }}
+                                        initial="enter"
+                                        animate="center"
+                                        exit="exit"
+                                        transition={{ duration: 0.18, ease: 'easeOut' }}
+                                        className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl bg-black"
+                                        alt="Preview"
+                                        onError={() => {
+                                            const key = getPreviewCacheKey(file.id, effectiveFolderId(file, activeFolderId));
+                                            forgetPreview(key);
 
-                                    if (retryCount < 1) {
-                                        setRetryCount((prev) => prev + 1);
-                                        setReloadNonce((prev) => prev + 1);
-                                        return;
-                                    }
+                                            if (retryCount < 1) {
+                                                setRetryCount((prev) => prev + 1);
+                                                setReloadNonce((prev) => prev + 1);
+                                                return;
+                                            }
 
-                                    setError('Failed to render image preview');
-                                }}
-                            />
+                                            setError('Failed to render image preview');
+                                        }}
+                                    />
+                                </AnimatePresence>
+                            )
                         ) : (
                             <div className="bg-[#1c1c1c] p-8 rounded-xl text-center border border-white/10 shadow-2xl">
                                 <File className="w-16 h-16 text-telegram-primary mx-auto mb-4" />
@@ -324,7 +455,12 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
                                                 toast.error('File returned inline; nothing to open externally');
                                                 return;
                                             }
-                                            await invoke('cmd_open_path', { path });
+                                            // Pass the source filename so the
+                                            // web build can trigger an `<a download>`
+                                            // with the right extension. Tauri ignores
+                                            // the extra arg (it uses the cached path's
+                                            // basename for OS app association).
+                                            await invoke('cmd_open_path', { path, filename: file.name });
                                         } catch (e) {
                                             toast.error(`Open failed: ${e}`);
                                         }
@@ -339,12 +475,16 @@ export function PreviewModal({ file, onClose, onNext, onPrev, currentIndex, tota
                     </div>
                 )}
 
-                <div className="absolute bottom-2 sm:bottom-[-3rem] left-1/2 -translate-x-1/2 max-w-[90%] truncate text-white text-xs sm:text-sm opacity-70 sm:opacity-50 text-center px-3 py-1 rounded bg-black/40 sm:bg-transparent">
-                    {file.name}
-                    {typeof currentIndex === 'number' && typeof totalItems === 'number' && totalItems > 0 && (
-                        <span className="ml-3">{currentIndex + 1}/{totalItems}</span>
-                    )}
-                </div>
+                {/* Bottom filename strip — desktop only. Mobile shows the
+                    name in the top bar so it never crosses the image. */}
+                {!isMobile && (
+                    <div className="absolute bottom-[-3rem] left-1/2 -translate-x-1/2 max-w-[90%] truncate text-white text-sm opacity-50 text-center px-3 py-1">
+                        {file.name}
+                        {typeof currentIndex === 'number' && typeof totalItems === 'number' && totalItems > 0 && (
+                            <span className="ml-3">{currentIndex + 1}/{totalItems}</span>
+                        )}
+                    </div>
+                )}
             </div>
         </div>
     );

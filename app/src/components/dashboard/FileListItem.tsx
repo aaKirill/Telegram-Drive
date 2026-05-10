@@ -16,12 +16,14 @@ interface FileListItemProps {
     onPreview: (file: TelegramFile) => void;
     onDownload: (id: number, name: string) => void;
     onDelete: (id: number) => void;
+    /** Disable drag while Select mode is active. */
+    selectMode?: boolean;
 }
 
 export function FileListItem({
     file, selectedIds, onFileClick, onFileDoubleClick, handleContextMenu,
     onDragStart, onDragEnd, onDrop,
-    onPreview, onDownload, onDelete
+    onPreview, onDownload, onDelete, selectMode = false,
 }: FileListItemProps) {
     const [isDragOver, setIsDragOver] = useState(false);
     const isFolder = file.type === 'folder';
@@ -31,16 +33,28 @@ export function FileListItem({
         handleContextMenu(synthetic, file);
     });
 
+    const composedClick = (e: React.MouseEvent) => {
+        longPress.onClick(e);
+        if (e.defaultPrevented) return;
+        onFileClick(e, file.id);
+    };
+
     return (
         <div
-            onClick={(e) => onFileClick(e, file.id)}
+            onClick={composedClick}
             onDoubleClick={onFileDoubleClick}
+            // Suppress iOS Safari's native long-press menu — see FileCard
+            // for the same rationale.
+            style={{ WebkitTouchCallout: 'none', WebkitUserSelect: 'none' }}
             onMouseDown={(e) => {
                 if (e.shiftKey) e.preventDefault();
             }}
             onContextMenu={(e) => handleContextMenu(e, file)}
-            {...longPress}
-            draggable
+            onTouchStart={longPress.onTouchStart}
+            onTouchMove={longPress.onTouchMove}
+            onTouchEnd={longPress.onTouchEnd}
+            onTouchCancel={longPress.onTouchCancel}
+            draggable={!selectMode}
             onDragStart={(e) => {
                 if (onDragStart) onDragStart(file.id);
                 e.dataTransfer.setData("application/x-telegram-file-id", file.id.toString());

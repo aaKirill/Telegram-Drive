@@ -21,6 +21,7 @@ type FileMetadata = {
   file_ext: string | null;
   created_at: string;
   icon_type: string;
+  duration_secs?: number | null;
 };
 
 const TD_MARK = /\s*\[td\]\s*/gi;
@@ -194,20 +195,33 @@ export async function getFiles(folderId: number | null): Promise<FileMetadata[]>
     try { return await walkOnce(filter); }
     catch { return await walkOnce(filter); }
   };
-  const results = await Promise.allSettled([
-    walk(new Api.InputMessagesFilterPhotos()),
-    walk(new Api.InputMessagesFilterDocument()),
-    walk(new Api.InputMessagesFilterVideo()),
-    walk(new Api.InputMessagesFilterMusic()),
-    walk(new Api.InputMessagesFilterVoice()),
-    walk(new Api.InputMessagesFilterGif()),
-    // Unfiltered backstop: catches stragglers with attribute combos that
-    // don't match any of the typed filters (round videos, files with no
-    // recognised attributes, etc.). Bounded to the most recent 2000
-    // messages; the typed filters above pick up older media beyond that
-    // window for chats with > 2000 total messages.
-    walk(new Api.InputMessagesFilterEmpty()),
-  ]);
+  // Run walks SEQUENTIALLY rather than via Promise.allSettled — the
+  // previous parallel kickoff fired 7 GetHistory streams at once which
+  // promptly tripped Telegram's per-DC FLOOD_WAIT on mobile (spamming
+  // "Sleeping for 30s on flood wait" warnings into the console). Mobile
+  // networks make this even worse because the DC has fewer concurrent
+  // request slots per-IP. Sequential is slower but actually completes;
+  // most folders return well under the timeout.
+  const filters: Api.TypeMessagesFilter[] = [
+    // Backstop first — covers most files in one walk for small folders,
+    // so the user sees something before we fan out the typed filters.
+    new Api.InputMessagesFilterEmpty(),
+    new Api.InputMessagesFilterPhotos(),
+    new Api.InputMessagesFilterDocument(),
+    new Api.InputMessagesFilterVideo(),
+    new Api.InputMessagesFilterMusic(),
+    new Api.InputMessagesFilterVoice(),
+    new Api.InputMessagesFilterGif(),
+  ];
+  const results: PromiseSettledResult<FileMetadata[]>[] = [];
+  for (const f of filters) {
+    try {
+      const v = await walk(f);
+      results.push({ status: "fulfilled", value: v });
+    } catch (e) {
+      results.push({ status: "rejected", reason: e });
+    }
+  }
   const seen = new Set<number>();
   const out: FileMetadata[] = [];
   for (const r of results) {
@@ -331,6 +345,10 @@ export function mapMessageToFile(
     if (isSticker) return null;
     const mime = doc.mimeType;
     const { name, ext } = extractFilename(doc, mime);
+    const videoAttr = doc.attributes.find(
+      (a): a is Api.DocumentAttributeVideo => a instanceof Api.DocumentAttributeVideo,
+    );
+    const duration_secs = videoAttr ? Math.ceil(Number(videoAttr.duration ?? 0)) : null;
     return {
       id: msg.id,
       folder_id: folderId,
@@ -340,6 +358,7 @@ export function mapMessageToFile(
       file_ext: ext,
       created_at: date,
       icon_type: "file",
+      duration_secs,
     };
   }
   if (media instanceof Api.MessageMediaPhoto && media.photo instanceof Api.Photo) {

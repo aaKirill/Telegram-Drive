@@ -192,7 +192,9 @@ function AppContent() {
                 onUpdate={downloadAndInstall}
                 onDismiss={dismissUpdate}
             />
-            <Toaster theme={theme} position="bottom-center" />
+            {/* Top-center keeps toasts away from the bottom-right
+                TransferQueue panel and the mobile bulk-action bar. */}
+            <Toaster theme={theme} position="top-center" offset={16} />
             {authState === "checking" ? (
                 <div className="h-full w-full flex items-center justify-center">
                     <div className="w-10 h-10 border-4 border-telegram-primary border-t-transparent rounded-full animate-spin" />

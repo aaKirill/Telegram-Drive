@@ -74,6 +74,9 @@ export function useFileUpload(activeFolderId: number | null, store: Store | null
                 cancelledRef.current.delete(item.id);
             } else {
                 setUploadQueue(q => q.map(i => i.id === item.id ? { ...i, status: 'success', progress: 100 } : i));
+                // Bandwidth changed → push our slot so other devices'
+                // "Used Today" widgets pick up the new contribution.
+                import('../lib/sync').then(m => m.markDirty()).catch(() => { });
                 // Optimistic insert: cmd_upload_file returns the metadata
                 // for the just-sent message, so we splice it into the
                 // React Query cache without waiting for Telegram's

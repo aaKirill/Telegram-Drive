@@ -24,8 +24,13 @@ pub struct FileMetadata {
     pub size: u64, // Updated to u64
     pub mime_type: Option<String>,
     pub file_ext: Option<String>, // Added field
-    pub created_at: String, 
-    pub icon_type: String, 
+    pub created_at: String,
+    pub icon_type: String,
+    /// For video documents (DocumentAttributeVideo) — duration in seconds.
+    /// None for non-video media. Surfaced to the frontend so the FileCard
+    /// can render an iOS-Photos-style time pill on video thumbnails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

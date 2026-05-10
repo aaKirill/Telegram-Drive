@@ -40,6 +40,12 @@ interface Snapshot {
   // forward-compatible (they just ignore the key on parse). Carries the
   // ordered folder list — without it, deletes/reorders never propagate.
   folders?: TelegramFolder[];
+  // Per-device daily bandwidth contributions, keyed by a stable device id.
+  // The displayed "Used Today" sums every entry whose date matches today.
+  // Each device only writes its own slot; we replay every other device's
+  // slot from local cache when building the snapshot, so concurrent
+  // pushes don't lose contributions.
+  bandwidthByDevice?: Record<string, { date: string; up: number; down: number }>;
 }
 
 const DEVICE: "web" | "tauri" =
@@ -203,6 +209,65 @@ async function pushSnapshotTo(folderId: number | null, snap: Snapshot): Promise<
   await invoke("cmd_sync_write", { bytes: Array.from(bytes), folderId });
 }
 
+// Settings keys that are intentionally NOT synced — each device keeps its
+// own value. defaultView is per-device because users naturally want
+// different layouts on phone vs. a 27" monitor; gridColumnsDesktop is
+// only meaningful on desktop and at different display widths.
+const PER_DEVICE_SETTINGS = ['defaultView', 'gridColumnsDesktop'] as const satisfies ReadonlyArray<keyof AppSettings>;
+
+// Stable per-device id, generated once. Used to slot this device's
+// bandwidth contribution into the shared snapshot without overwriting
+// other devices' slots.
+const DEVICE_ID_KEY = "_td_device_id_v1";
+function getOrCreateDeviceId(): string {
+  if (typeof localStorage === "undefined") return DEVICE;
+  let id = localStorage.getItem(DEVICE_ID_KEY);
+  if (!id) {
+    id = (typeof crypto !== "undefined" && "randomUUID" in crypto)
+      ? crypto.randomUUID()
+      : `${DEVICE}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    try { localStorage.setItem(DEVICE_ID_KEY, id); } catch { /* private mode */ }
+  }
+  return id;
+}
+
+// Cache of every other device's most-recent bandwidth slot. Replayed into
+// each outgoing snapshot so a concurrent push doesn't drop slots we
+// learned about earlier.
+const REMOTE_BW_KEY = "_td_remote_bandwidth_v1";
+type BwSlotMap = Record<string, { date: string; up: number; down: number }>;
+function loadRemoteBandwidth(): BwSlotMap {
+  if (typeof localStorage === "undefined") return {};
+  try {
+    const v = JSON.parse(localStorage.getItem(REMOTE_BW_KEY) ?? "{}");
+    return v && typeof v === "object" ? (v as BwSlotMap) : {};
+  } catch { return {}; }
+}
+function saveRemoteBandwidth(map: BwSlotMap): void {
+  if (typeof localStorage === "undefined") return;
+  try { localStorage.setItem(REMOTE_BW_KEY, JSON.stringify(map)); } catch { /* quota */ }
+}
+
+function todayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** Sum of every OTHER device's bandwidth contribution for today. The
+ *  caller (BandwidthWidget) adds this to its own local up/down totals. */
+export function getRemoteBandwidthToday(): { up: number; down: number } {
+  const map = loadRemoteBandwidth();
+  const today = todayUtc();
+  let up = 0, down = 0;
+  const myId = getOrCreateDeviceId();
+  for (const [id, slot] of Object.entries(map)) {
+    if (id === myId) continue;
+    if (!slot || slot.date !== today) continue;
+    up += Number(slot.up) || 0;
+    down += Number(slot.down) || 0;
+  }
+  return { up, down };
+}
+
 async function buildLocalSnapshot(): Promise<Snapshot> {
   const settings = getCurrentSettings();
   const folderPrefs = getCurrentPrefs();
@@ -216,15 +281,36 @@ async function buildLocalSnapshot(): Promise<Snapshot> {
     lockAttempts = await invoke<Record<string, number>>("cmd_export_lock_attempts");
   } catch { /* same */ }
 
+  // Strip per-device keys from the pushed snapshot so they don't propagate
+  // to other devices' AppSettings on apply.
+  const sharedSettings: Partial<AppSettings> = { ...settings };
+  for (const k of PER_DEVICE_SETTINGS) delete (sharedSettings as Partial<AppSettings>)[k];
+
+  // Bandwidth: replay every cached remote slot, then write our own slot
+  // for today on top. This avoids dropping contributions from devices
+  // that pushed since we last pulled.
+  let bandwidthByDevice: BwSlotMap | undefined;
+  try {
+    const localBw = await invoke<{ up_bytes: number; down_bytes: number }>("cmd_get_bandwidth");
+    const merged: BwSlotMap = { ...loadRemoteBandwidth() };
+    merged[getOrCreateDeviceId()] = {
+      date: todayUtc(),
+      up: Number(localBw?.up_bytes) || 0,
+      down: Number(localBw?.down_bytes) || 0,
+    };
+    bandwidthByDevice = merged;
+  } catch { /* desktop missing the cmd in older builds — non-fatal */ }
+
   return {
     v: 1,
     ts: Date.now(),
     device: DEVICE,
-    settings,
+    settings: sharedSettings,
     folderPrefs,
     folderLocks,
     lockAttempts,
     folders: await readFoldersFromStore(),
+    bandwidthByDevice,
   };
 }
 
@@ -263,6 +349,13 @@ async function applySnapshot(snap: Snapshot): Promise<void> {
     if (localTs > 0 && snap.ts < localTs) {
       merged.syncFolderId = getCurrentSettings().syncFolderId;
     }
+    // Per-device settings are never overwritten by a remote snapshot.
+    // (Old snapshots written before this filter went in may carry these
+    //  keys; ignore them.)
+    const local = getCurrentSettings();
+    for (const k of PER_DEVICE_SETTINGS) {
+      (merged as AppSettings)[k] = local[k] as never;
+    }
     await setSettingsFromSync(merged);
   }
   if (snap.folderPrefs) {
@@ -277,6 +370,25 @@ async function applySnapshot(snap: Snapshot): Promise<void> {
     try {
       await invoke("cmd_import_lock_attempts", { attempts: snap.lockAttempts });
     } catch { /* same */ }
+  }
+  if (snap.bandwidthByDevice) {
+    // Cache other devices' slots so the widget can sum them. We never
+    // overwrite our own slot here — it's whatever cmd_get_bandwidth
+    // reports locally.
+    const incoming = snap.bandwidthByDevice;
+    const map = { ...loadRemoteBandwidth() };
+    const myId = getOrCreateDeviceId();
+    for (const [id, slot] of Object.entries(incoming)) {
+      if (id === myId) continue;
+      if (!slot || typeof slot !== "object") continue;
+      map[id] = {
+        date: String((slot as { date?: unknown }).date ?? ""),
+        up: Number((slot as { up?: unknown }).up) || 0,
+        down: Number((slot as { down?: unknown }).down) || 0,
+      };
+    }
+    saveRemoteBandwidth(map);
+    window.dispatchEvent(new Event("td:bandwidth-applied"));
   }
   if (snap.folders) {
     // LWW replace: write the remote folder list verbatim so deletes /

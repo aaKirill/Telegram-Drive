@@ -13,6 +13,7 @@ import bigInt from "big-integer";
 import { ensureClient } from "./client";
 import { emitWebEvent } from "./event";
 import { mapMessageToFile } from "./folders";
+import { recordDownload, recordUpload } from "./bandwidth";
 
 // Hard timeout on any single Telegram read so a dropped WSS connection
 // doesn't leave the React Query / preview promise pending forever. The
@@ -142,6 +143,42 @@ async function loadImageBitmap(file: File): Promise<ImageBitmap | HTMLImageEleme
   });
 }
 
+// Probe a video File for duration + dimensions via a hidden <video> element
+// so we can attach DocumentAttributeVideo on upload. Without that attribute,
+// Telegram serves the file as a generic document and every client (Tauri
+// included) renders it without a duration pill.
+//
+// Returns null on any failure — exotic codecs, decode timeouts, etc. The
+// upload still succeeds; the file just won't have a duration tag.
+async function probeVideoMetadata(file: File): Promise<{ duration: number; w: number; h: number } | null> {
+  if (!file.type.startsWith("video/")) return null;
+  return await new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.muted = true;
+    let settled = false;
+    const cleanup = () => {
+      URL.revokeObjectURL(url);
+      video.src = "";
+    };
+    const finish = (v: { duration: number; w: number; h: number } | null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(v);
+    };
+    video.onloadedmetadata = () => {
+      const d = Number.isFinite(video.duration) ? Math.max(0, video.duration) : 0;
+      finish({ duration: d, w: video.videoWidth || 0, h: video.videoHeight || 0 });
+    };
+    video.onerror = () => finish(null);
+    // Hard 5s safety timeout — some codecs never raise loadedmetadata.
+    setTimeout(() => finish(null), 5000);
+    video.src = url;
+  });
+}
+
 // --- Upload --------------------------------------------------------------
 
 export async function uploadFile(
@@ -171,11 +208,38 @@ export async function uploadFile(
   // placeholder icon on every other client (and on the desktop app once
   // the message syncs over) until the user opens the full preview.
   const thumb = await generateThumbForFile(file);
+  // For video files, attach DocumentAttributeVideo so every client
+  // (including ours) shows duration + correct dimensions. Without this
+  // attribute, gramjs's sendFile uploads the video as a plain document
+  // and the duration pill never appears.
+  //
+  // Heuristic: trust file.type if present, fall back to extension match
+  // — some Files-app handoffs on iOS arrive with empty `type`, but the
+  // browser still feeds the bytes through HTMLVideoElement just fine.
+  const looksLikeVideo =
+    file.type.startsWith("video/") || /\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(file.name);
+  const videoMeta = looksLikeVideo ? await probeVideoMetadata(file) : null;
+  const videoAttr = videoMeta && videoMeta.duration > 0
+    ? new Api.DocumentAttributeVideo({
+        duration: videoMeta.duration,
+        w: videoMeta.w,
+        h: videoMeta.h,
+        supportsStreaming: true,
+      })
+    : null;
+  // gramjs's docs state user-supplied `attributes` "override the inferred
+  // ones" — to be safe we always include the filename attribute so it
+  // isn't lost when we slot in the video one.
+  const attributes: Api.TypeDocumentAttribute[] = [
+    new Api.DocumentAttributeFilename({ fileName: file.name }),
+  ];
+  if (videoAttr) attributes.push(videoAttr);
   try {
     const sent = await c.sendFile(entity, {
       file: customFile,
       forceDocument: true,
       thumb: thumb ?? undefined,
+      attributes,
       progressCallback: (p) => {
         // Throwing inside the progress callback bubbles up from sendFile
         // and stops further chunk uploads. Telegram's CDN garbage-collects
@@ -188,6 +252,7 @@ export async function uploadFile(
       },
     });
     emitWebEvent("upload-progress", { id: transferId, percent: 100 });
+    recordUpload(file.size);
 
     // Optimistic insert: build FileMetadata immediately so the frontend
     // doesn't have to wait on Telegram's GetHistory replication lag. Try
@@ -267,6 +332,7 @@ export async function downloadFile(
     const buffer = concatChunks(chunks);
     triggerBlobDownload(buffer, filename, "application/octet-stream");
     emitWebEvent("download-progress", { id: transferId, percent: 100 });
+    recordDownload(receivedTotal);
   });
   clearCancellation(transferId);
 }
@@ -497,11 +563,27 @@ function mimeForMessage(msg: Api.TypeMessage): string | null {
 
 // --- Open path -----------------------------------------------------------
 
-export async function openPath(path: string): Promise<void> {
+export async function openPath(path: string, filename?: string): Promise<void> {
   // The Tauri build uses the OS shell to launch a downloaded file. In a PWA
-  // the closest equivalent is opening the URL in a new tab; for blob URLs
-  // produced by getPreview that gives the user a viewable image.
+  // the closest equivalent is triggering a real download with the original
+  // filename so the OS associates it with the right app on disk. Plain
+  // `window.open(blob:)` left blob URLs without a filename, so the
+  // browser saved them as a uuid with no extension — that's why .pages
+  // (and .docx, .key, .numbers, …) downloads ended up as "an app with no
+  // extension". An anchor with `download="<original.pages>"` carries the
+  // filename through the download path.
   if (path.startsWith("blob:")) {
+    if (filename && filename.length > 0) {
+      const a = document.createElement("a");
+      a.href = path;
+      a.download = filename;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      // Defer cleanup so Safari has time to register the download.
+      setTimeout(() => { a.parentNode?.removeChild(a); }, 1000);
+      return;
+    }
     window.open(path, "_blank", "noopener,noreferrer");
     return;
   }

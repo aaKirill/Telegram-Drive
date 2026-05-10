@@ -105,10 +105,11 @@ export function SidebarItem({ icon: Icon, label, active = false, onClick, onDrop
                         role="button"
                         tabIndex={-1}
                         onClick={(e) => { e.stopPropagation(); setMenuOpen(s => !s); }}
-                        className={`p-1 rounded transition-opacity hover:bg-telegram-hover/60 ${menuOpen ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                        className={`-mr-1 p-2 md:p-1 rounded transition-opacity hover:bg-telegram-hover/60 active:bg-telegram-hover ${menuOpen ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}
                         title="More"
                     >
-                        <MoreVertical className="w-3.5 h-3.5" />
+                        <MoreVertical className="w-4 h-4 md:w-3.5 md:h-3.5" />
                     </span>
                 )}
             </button>
@@ -116,21 +117,25 @@ export function SidebarItem({ icon: Icon, label, active = false, onClick, onDrop
             {menuOpen && (
                 <div
                     ref={menuRef}
-                    className="absolute right-1 top-full mt-1 z-30 min-w-[160px] bg-telegram-surface border border-telegram-border rounded-md shadow-lg py-1 text-sm"
+                    className="absolute right-1 top-full mt-1 z-30 min-w-[180px] bg-telegram-surface border border-telegram-border rounded-md shadow-lg py-1 text-sm"
                     onClick={(e) => e.stopPropagation()}
                 >
                     {lockState === 'unlocked' && onLockNow && (
                         <button
+                            type="button"
                             onClick={() => { setMenuOpen(false); onLockNow(); }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-telegram-text hover:bg-telegram-hover"
+                            style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                            className="w-full flex items-center gap-2 px-3 py-2 text-left text-telegram-text hover:bg-telegram-hover active:bg-telegram-hover/80"
                         >
                             <Lock className="w-3.5 h-3.5" /> Lock now
                         </button>
                     )}
                     {lockState !== 'locked' && onManagePassword && (
                         <button
+                            type="button"
                             onClick={() => { setMenuOpen(false); onManagePassword(); }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-telegram-text hover:bg-telegram-hover"
+                            style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                            className="w-full flex items-center gap-2 px-3 py-2 text-left text-telegram-text hover:bg-telegram-hover active:bg-telegram-hover/80"
                         >
                             <KeyRound className="w-3.5 h-3.5" />
                             {lockState === 'unlocked' ? 'Remove password' : 'Set password'}
@@ -138,8 +143,10 @@ export function SidebarItem({ icon: Icon, label, active = false, onClick, onDrop
                     )}
                     {onDelete && (
                         <button
+                            type="button"
                             onClick={() => { setMenuOpen(false); onDelete(); }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-red-400 hover:bg-red-500/10"
+                            style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                            className="w-full flex items-center gap-2 px-3 py-2 text-left text-red-400 hover:bg-red-500/10 active:bg-red-500/15"
                         >
                             <Trash2 className="w-3.5 h-3.5" /> Delete folder
                         </button>

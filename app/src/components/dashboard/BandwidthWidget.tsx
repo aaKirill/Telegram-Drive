@@ -1,18 +1,30 @@
+import { useEffect, useState } from 'react';
 import { BandwidthStats } from '../../types';
 import { formatBytes } from '../../utils';
+import { getRemoteBandwidthToday } from '../../lib/sync';
 
 interface BandwidthWidgetProps {
     bandwidth: BandwidthStats | null;
 }
 
 export function BandwidthWidget({ bandwidth }: BandwidthWidgetProps) {
-    if (!bandwidth) return null;
-    // Web build doesn't track bandwidth — cmd_get_bandwidth returns 0/0
-    // hardcoded — so the bar is permanently empty and confusing. Hide
-    // the widget entirely there.
-    if (import.meta.env.VITE_TARGET === 'web') return null;
+    // Remote contributions arrive via the sync snapshot — re-read on every
+    // td:bandwidth-applied event so the widget reflects new data without
+    // a reload.
+    const [remote, setRemote] = useState(() => getRemoteBandwidthToday());
+    useEffect(() => {
+        const refresh = () => setRemote(getRemoteBandwidthToday());
+        window.addEventListener('td:bandwidth-applied', refresh);
+        window.addEventListener('td:sync-applied', refresh);
+        return () => {
+            window.removeEventListener('td:bandwidth-applied', refresh);
+            window.removeEventListener('td:sync-applied', refresh);
+        };
+    }, []);
 
-    const totalBytes = bandwidth.up_bytes + bandwidth.down_bytes;
+    if (!bandwidth) return null;
+
+    const totalBytes = bandwidth.up_bytes + bandwidth.down_bytes + remote.up + remote.down;
     const limit = 250 * 1024 * 1024 * 1024; // 250GB
     const percent = Math.min((totalBytes / limit) * 100, 100);
 

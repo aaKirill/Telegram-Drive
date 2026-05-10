@@ -96,6 +96,7 @@ export function useFileDownload(store: Store | null) {
             } else {
                 setDownloadQueue(q => q.map(i => i.id === item.id ? { ...i, status: 'success', progress: 100 } : i));
                 toast.success(`Downloaded: ${item.filename}`);
+                import('../lib/sync').then(m => m.markDirty()).catch(() => { });
             }
         } catch (e) {
             if (!cancelledRef.current.has(item.id)) {

@@ -11,8 +11,7 @@ import { formatBytes, isMediaFile, isPdfFile } from '../utils';
 import { Sidebar, FolderSelection } from './dashboard/Sidebar';
 import { TopBar } from './dashboard/TopBar';
 import { FileExplorer } from './dashboard/FileExplorer';
-import { UploadQueue } from './dashboard/UploadQueue';
-import { DownloadQueue } from './dashboard/DownloadQueue';
+import { TransferQueue } from './dashboard/TransferQueue';
 import { MoveToFolderModal } from './dashboard/MoveToFolderModal';
 import { PreviewModal } from './dashboard/PreviewModal';
 import { DragDropOverlay } from './dashboard/DragDropOverlay';
@@ -85,6 +84,14 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
     const isMobile = useIsMobile();
     const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+    /** Select mode (cross-platform). When true, clicks/taps toggle selection
+     *  and drag-drop is disabled on cards. Entered via the topbar Select
+     *  button. Auto-exits after a non-empty selection drains. */
+    const [selectMode, setSelectMode] = useState(false);
+    /** Mobile-only single-select filter (the desktop FileExplorer chrome
+     *  has its own multi-select Set). Lives here so the topbar's More
+     *  menu can change it without prop-drilling through FileExplorer. */
+    const [mobileFilter, setMobileFilter] = useState<'all' | 'image' | 'video' | 'audio' | 'document' | 'other'>('all');
 
     const [previewFile, setPreviewFile] = useState<TelegramFile | null>(null);
     // viewMode is derived directly from app settings — no local copy. The
@@ -167,9 +174,14 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
     });
 
     const displayedFiles = (() => {
+        // Strip the cross-device sync snapshot (`td-sync.json`) from the
+        // visible list — it's an internal system file, not user content.
+        // Filtered here at the display layer rather than at the fetch so
+        // it still gets pruned/managed by the sync logic that needs it.
+        const isSystemFile = (f: TelegramFile) => f.name === 'td-sync.json';
         const lower = searchTerm.toLowerCase().trim();
-        if (!lower) return allFiles;
-        const local = allFiles.filter((f: TelegramFile) => f.name.toLowerCase().includes(lower));
+        if (!lower) return allFiles.filter(f => !isSystemFile(f));
+        const local = allFiles.filter((f: TelegramFile) => f.name.toLowerCase().includes(lower) && !isSystemFile(f));
         if (lower.length <= 2) return local;
         const localIds = new Set(local.map(f => f.id));
         // Telegram's messages.searchGlobal spans every chat, not just [TD]
@@ -178,6 +190,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
         const driveFolderIds = new Set(folders.map(f => f.id));
         const extra = searchResults.filter(f =>
             !localIds.has(f.id)
+            && !isSystemFile(f)
             && f.folder_id != null
             && driveFolderIds.has(f.folder_id)
         );
@@ -263,7 +276,23 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
         setPreviewContextIndex(-1);
         selectionAnchorRef.current = null;
         anchorIsAdditiveRef.current = false;
+        setSelectMode(false);
     }, [activeFolderId]);
+
+    // Auto-exit Select mode after the selection drains (e.g. after a bulk
+    // move/delete completes). Gates on "selection has been non-empty during
+    // this select-mode session" — without that, we'd flip mode off the
+    // instant the user taps the Select button (which enters with an empty
+    // selection), and picking anything would be impossible.
+    const hadSelectionInMode = useRef(false);
+    useEffect(() => {
+        if (!selectMode) { hadSelectionInMode.current = false; return; }
+        if (selectedIds.length > 0) { hadSelectionInMode.current = true; return; }
+        if (hadSelectionInMode.current) {
+            setSelectMode(false);
+            hadSelectionInMode.current = false;
+        }
+    }, [selectMode, selectedIds.length]);
 
 
     useEffect(() => {
@@ -289,18 +318,18 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
         e.stopPropagation();
 
         // Mobile: no shift/cmd, no double-click. Tap behaviour depends on
-        // whether we're already in selection mode:
-        //   - Empty selection → tap opens the file (preview/navigate).
-        //   - Selection active → tap toggles. Selection mode is entered
-        //     by tapping the (always-visible) checkbox circle, or by
-        //     long-pressing then choosing Select from the context menu.
+        // whether the user is in mobile Select mode (entered via topbar).
+        //   - Select mode on  → tap toggles selection.
+        //   - Select mode off → tap opens the file (preview / navigate).
+        // Long-press always opens the context menu (handled by useLongPress
+        // on the card itself).
         if (isMobile) {
-            if (selectedIds.length === 0) {
-                const file = displayedFiles.find((f) => f.id === id);
-                if (file) handleFileDoubleClick(file, displayedFiles);
+            if (selectMode) {
+                handleToggleSelection(id);
                 return;
             }
-            handleToggleSelection(id);
+            const file = displayedFiles.find((f) => f.id === id);
+            if (file) handleFileDoubleClick(file, displayedFiles);
             return;
         }
 
@@ -353,15 +382,6 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
     const handleToggleSelection = useCallback((id: number) => {
         setSelectedIds(ids => ids.includes(id) ? ids.filter(i => i !== id) : [...ids, id]);
-        selectionAnchorRef.current = id;
-        anchorIsAdditiveRef.current = true;
-    }, []);
-
-    // Add-only variant for the swipe-to-select gesture. Toggling on each
-    // pass would mean a finger that re-crossed a card mid-swipe would
-    // unselect it, which is the opposite of what gallery swipes do.
-    const handleAddToSelection = useCallback((id: number) => {
-        setSelectedIds(ids => ids.includes(id) ? ids : [...ids, id]);
         selectionAnchorRef.current = id;
         anchorIsAdditiveRef.current = true;
     }, []);
@@ -669,7 +689,12 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
             />
 
             <main
-                className={`flex-1 flex flex-col min-w-0 ${isMobile && selectedIds.length > 0 ? 'pb-14' : ''}`}
+                className="flex-1 flex flex-col min-w-0"
+                style={
+                    isMobile && selectedIds.length > 0
+                        ? { paddingBottom: `calc(3.5rem + env(safe-area-inset-bottom))` }
+                        : undefined
+                }
                 onClick={(e) => { if (e.target === e.currentTarget) setSelectedIds([]); }}
             >
                 <TopBar
@@ -691,6 +716,25 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                     onSearchChange={setSearchTerm}
                     isMobile={isMobile}
                     onMobileMenu={() => setMobileSidebarOpen(true)}
+                    selectMode={selectMode}
+                    onToggleSelectMode={() => {
+                        // Toggling out of select mode also clears the selection;
+                        // otherwise the floating bottom action bar stays visible
+                        // with stale items the user can't see "selected" because
+                        // the checkboxes are hidden.
+                        if (selectMode) setSelectedIds([]);
+                        setSelectMode(s => !s);
+                    }}
+                    gridColumns={appSettings.gridColumnsDesktop}
+                    onGridColumnsChange={(n) => updateAppSettings('gridColumnsDesktop', n)}
+                    sortField={appSettings.defaultSortField}
+                    sortDirection={appSettings.defaultSortDir}
+                    onSortChange={(field, dir) => {
+                        updateAppSettings('defaultSortField', field);
+                        updateAppSettings('defaultSortDir', dir);
+                    }}
+                    mobileFilter={mobileFilter}
+                    onMobileFilterChange={setMobileFilter}
                 />
                 {(() => {
                     const trimmed = searchTerm.trim();
@@ -773,39 +817,68 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                         onManualUpload={handleManualUpload}
                         onSelectionClear={() => setSelectedIds([])}
                         onToggleSelection={handleToggleSelection}
-                        onAddToSelection={isMobile ? handleAddToSelection : undefined}
+                        onSetSelectedIds={isMobile ? setSelectedIds : undefined}
                         onDrop={handleDropOnFolder}
                         onDragStart={(fileId) => setInternalDragFileId(fileId)}
                         onDragEnd={() => setTimeout(() => setInternalDragFileId(null), 50)}
+                        selectMode={isMobile && selectMode}
+                        gridColumnsDesktop={appSettings.gridColumnsDesktop}
+                        mobileFilter={mobileFilter}
                     />
                 )}
             </main>
 
             {isMobile && selectedIds.length > 0 && (
-                <div className="fixed bottom-0 left-0 right-0 z-30 bg-telegram-surface border-t border-telegram-border px-3 py-2 flex items-center gap-2 shadow-[0_-4px_12px_rgba(0,0,0,0.2)]">
-                    <span className="text-xs text-telegram-subtext shrink-0">{selectedIds.length}</span>
+                <div
+                    className="fixed bottom-0 left-0 right-0 z-30 bg-telegram-surface border-t border-telegram-border px-3 flex items-center gap-2 shadow-[0_-4px_12px_rgba(0,0,0,0.25)]"
+                    // Stop click propagation here so taps on the action
+                    // buttons don't bubble up to the Dashboard root
+                    // `onClick` (which clears the selection) — that was
+                    // the bug behind "batch move doesn't work on mobile":
+                    // the Move tap opened the modal AND immediately wiped
+                    // selectedIds, leaving handleBulkMove with nothing to
+                    // operate on.
+                    onClick={(e) => e.stopPropagation()}
+                    // Inline padding combines a fixed gutter with the iOS
+                    // home-bar safe-area inset; using both Tailwind pt-/pb-
+                    // and a `.safe-bottom` class fights cascade ordering and
+                    // sometimes leaves no visual margin below the buttons.
+                    style={{
+                        paddingTop: '0.75rem',
+                        paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))',
+                    }}
+                >
+                    <span className="text-xs text-telegram-subtext shrink-0 tabular-nums">{selectedIds.length}</span>
                     <button
-                        onClick={() => setSelectedIds([])}
-                        className="px-2 py-1.5 bg-telegram-hover hover:bg-telegram-border rounded-md text-xs text-telegram-text shrink-0"
+                        type="button"
+                        onClick={() => { setSelectedIds([]); setSelectMode(false); }}
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                        className="h-9 px-3 inline-flex items-center justify-center bg-telegram-hover hover:bg-telegram-border rounded-md text-xs text-telegram-text shrink-0"
                     >
                         Clear
                     </button>
                     <div className="flex-1" />
                     <button
+                        type="button"
                         onClick={() => setShowMoveModal(true)}
-                        className="px-3 py-1.5 bg-telegram-primary/20 hover:bg-telegram-primary/30 text-telegram-primary rounded-md text-xs font-medium"
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                        className="h-9 px-3 inline-flex items-center justify-center bg-telegram-primary/20 hover:bg-telegram-primary/30 text-telegram-primary rounded-md text-xs font-medium"
                     >
                         Move
                     </button>
                     <button
+                        type="button"
                         onClick={handleBulkDownload}
-                        className="px-3 py-1.5 bg-telegram-hover hover:bg-telegram-border rounded-md text-xs text-telegram-text"
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                        className="h-9 px-3 inline-flex items-center justify-center bg-telegram-hover hover:bg-telegram-border rounded-md text-xs text-telegram-text"
                     >
                         Download
                     </button>
                     <button
+                        type="button"
                         onClick={handleBulkDelete}
-                        className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-md text-xs"
+                        style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+                        className="h-9 px-3 inline-flex items-center justify-center bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-md text-xs"
                     >
                         Delete
                     </button>
@@ -827,16 +900,14 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
             )}
 
 
-            <UploadQueue
-                items={uploadQueue}
-                onClearFinished={() => setUploadQueue(q => q.filter(i => i.status !== 'success' && i.status !== 'error' && i.status !== 'cancelled'))}
-                onCancelAll={cancelUploads}
-            />
-            <DownloadQueue
-                items={downloadQueue}
-                onClearFinished={clearDownloads}
-                onCancelAll={cancelDownloads}
-                onDismiss={dismissDownload}
+            <TransferQueue
+                uploads={uploadQueue}
+                downloads={downloadQueue}
+                onClearUploads={() => setUploadQueue(q => q.filter(i => i.status !== 'success' && i.status !== 'error' && i.status !== 'cancelled'))}
+                onCancelAllUploads={cancelUploads}
+                onClearDownloads={clearDownloads}
+                onCancelAllDownloads={cancelDownloads}
+                onDismissDownload={dismissDownload}
             />
         </div>
     );

@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
-import { Eye, HardDrive, Trash2, FolderOpen, Pencil, Play, FileText } from 'lucide-react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Eye, HardDrive, Trash2, FolderOpen, Pencil, Play, FileText, Copy } from 'lucide-react';
 import { TelegramFile } from '../../types';
-import { isMediaFile, isPdfFile } from '../../utils';
+import { isMediaFile, isPdfFile, isImageFile } from '../../utils';
 
 interface ContextMenuProps {
     x: number;
@@ -11,27 +11,31 @@ interface ContextMenuProps {
     onDownload: () => void;
     onDelete: () => void;
     onPreview: () => void;
+    /** Optional — when present, image files get a "Copy image" entry. */
+    onCopyImage?: () => void;
 }
 
-export function ContextMenu({ x, y, file, onClose, onDownload, onDelete, onPreview }: ContextMenuProps) {
-    const [adjustedPos, setAdjustedPos] = useState({ x, y });
+export function ContextMenu({ x, y, file, onClose, onDownload, onDelete, onPreview, onCopyImage }: ContextMenuProps) {
+    // Single-pass position: render at click point, then useLayoutEffect
+    // reads the menu's bounding box and snaps to bounds-adjusted pos in
+    // the same paint cycle. No opacity dance, no animation — the menu
+    // appears instantly at the right spot. Earlier two-phase / animated
+    // designs caused the "menu briefly appears at one place, then jumps"
+    // bug on iOS Safari (long-press synthesizes a chain of events that
+    // clashed with rAF-deferred state).
+    const [pos, setPos] = useState<{ x: number; y: number }>({ x, y });
     const menuRef = useRef<HTMLDivElement>(null);
 
-    // Adjust position to stay in bounds
-    useEffect(() => {
-        if (menuRef.current) {
-            const rect = menuRef.current.getBoundingClientRect();
-            let newX = x;
-            let newY = y;
-
-            if (x + rect.width > window.innerWidth) {
-                newX = x - rect.width;
-            }
-            if (y + rect.height > window.innerHeight) {
-                newY = y - rect.height;
-            }
-            setAdjustedPos({ x: newX, y: newY });
-        }
+    useLayoutEffect(() => {
+        if (!menuRef.current) return;
+        const rect = menuRef.current.getBoundingClientRect();
+        const margin = 8;
+        let newX = x;
+        let newY = y;
+        if (x + rect.width > window.innerWidth - margin) newX = Math.max(margin, x - rect.width);
+        if (y + rect.height > window.innerHeight - margin) newY = Math.max(margin, y - rect.height);
+        if (newX !== pos.x || newY !== pos.y) setPos({ x: newX, y: newY });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [x, y]);
 
     // Close on outside click / right-click / tap-away.
@@ -73,17 +77,20 @@ export function ContextMenu({ x, y, file, onClose, onDownload, onDelete, onPrevi
     return (
         <div
             ref={menuRef}
-            className="fixed z-50 min-w-[200px] bg-telegram-surface/95 backdrop-blur-xl border border-telegram-border rounded-lg shadow-2xl p-1.5 animate-in fade-in zoom-in-95 duration-100 flex flex-col gap-0.5"
-            style={{ left: adjustedPos.x, top: adjustedPos.y }}
+            className="fixed z-50 min-w-[200px] bg-telegram-surface/95 backdrop-blur-xl border border-telegram-border rounded-lg shadow-lg p-1.5 flex flex-col gap-0.5"
+            style={{ left: pos.x, top: pos.y }}
             onClick={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
         >
-            <div className="px-2 py-1.5 text-xs text-telegram-subtext font-medium truncate max-w-[180px] border-b border-telegram-border mb-1">
-                {file.name}
+            <div className="px-2 py-1.5 border-b border-telegram-border mb-1 max-w-[220px]">
+                <div className="text-xs text-telegram-text font-medium truncate" title={file.name}>{file.name}</div>
+                {file.type !== 'folder' && file.sizeStr && (
+                    <div className="text-[10px] text-telegram-subtext mt-0.5">{file.sizeStr}</div>
+                )}
             </div>
 
             {file.type !== 'folder' && (
-                <button onClick={onPreview} className="flex items-center gap-2 px-2 py-1.5 text-sm text-telegram-text hover:bg-telegram-hover rounded transition-colors text-left w-full">
+                <button type="button" onClick={onPreview} className="flex items-center gap-2 px-2 py-1.5 text-sm text-telegram-text hover:bg-telegram-hover rounded transition-colors text-left w-full">
                     {isMediaFile(file.name) ? (
                         <>
                             <Play className="w-4 h-4 text-telegram-primary" />
@@ -104,25 +111,32 @@ export function ContextMenu({ x, y, file, onClose, onDownload, onDelete, onPrevi
             )}
 
             {file.type === 'folder' && (
-                <button onClick={onPreview} className="flex items-center gap-2 px-2 py-1.5 text-sm text-telegram-text hover:bg-telegram-hover rounded transition-colors text-left w-full">
+                <button type="button" onClick={onPreview} className="flex items-center gap-2 px-2 py-1.5 text-sm text-telegram-text hover:bg-telegram-hover rounded transition-colors text-left w-full">
                     <FolderOpen className="w-4 h-4 text-yellow-500" />
                     Open
                 </button>
             )}
 
-            <button onClick={onDownload} className="flex items-center gap-2 px-2 py-1.5 text-sm text-telegram-text hover:bg-telegram-hover rounded transition-colors text-left w-full">
+            <button type="button" onClick={onDownload} className="flex items-center gap-2 px-2 py-1.5 text-sm text-telegram-text hover:bg-telegram-hover rounded transition-colors text-left w-full">
                 <HardDrive className="w-4 h-4 text-green-500" />
                 Download
             </button>
 
-            <button disabled className="flex items-center gap-2 px-2 py-1.5 text-sm text-telegram-subtext hover:bg-telegram-hover rounded transition-colors text-left w-full cursor-not-allowed opacity-50">
+            {onCopyImage && file.type !== 'folder' && isImageFile(file.name) && (
+                <button type="button" onClick={onCopyImage} className="flex items-center gap-2 px-2 py-1.5 text-sm text-telegram-text hover:bg-telegram-hover rounded transition-colors text-left w-full">
+                    <Copy className="w-4 h-4 text-blue-400" />
+                    Copy image
+                </button>
+            )}
+
+            <button type="button" disabled className="flex items-center gap-2 px-2 py-1.5 text-sm text-telegram-subtext hover:bg-telegram-hover rounded transition-colors text-left w-full cursor-not-allowed opacity-50">
                 <Pencil className="w-4 h-4" />
                 Rename
             </button>
 
             <div className="h-px bg-telegram-border my-1" />
 
-            <button onClick={onDelete} className="flex items-center gap-2 px-2 py-1.5 text-sm text-red-500 hover:bg-red-500/10 rounded transition-colors text-left w-full">
+            <button type="button" onClick={onDelete} className="flex items-center gap-2 px-2 py-1.5 text-sm text-red-500 hover:bg-red-500/10 rounded transition-colors text-left w-full">
                 <Trash2 className="w-4 h-4" />
                 Delete
             </button>

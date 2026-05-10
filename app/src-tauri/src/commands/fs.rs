@@ -229,6 +229,7 @@ pub async fn cmd_upload_file(
                 file_ext,
                 created_at: sent.date().to_string(),
                 icon_type: "file".into(),
+                duration_secs: None,
             }
         })
     };
@@ -486,6 +487,15 @@ fn push_file_from_message(
         // Skip stickers, contacts, polls, geo, dice, venues, geolive, webpage — not files
         _ => return,
     };
+    // Pull video duration from raw attributes when present. grammers'
+    // Media::Document doesn't expose attributes() directly, but Photo's
+    // raw and Document's raw both surface them through `.raw` access via
+    // a serialisable form. We re-derive via the message's raw view to
+    // keep the function self-contained.
+    let duration_secs = match msg.media() {
+        Some(Media::Document(d)) => extract_video_duration_secs(&d),
+        _ => None,
+    };
     files.push(FileMetadata {
         id: msg.id() as i64,
         folder_id,
@@ -495,7 +505,15 @@ fn push_file_from_message(
         file_ext: ext,
         created_at: msg.date().to_string(),
         icon_type: "file".into(),
+        duration_secs,
     });
+}
+
+/// Pull video duration (seconds) from a grammers Document; None for
+/// non-video documents. grammers exposes the underlying
+/// DocumentAttributeVideo through `Document::duration()` as f64 seconds.
+fn extract_video_duration_secs(doc: &grammers_client::types::media::Document) -> Option<u32> {
+    doc.duration().map(|d| d.ceil() as u32)
 }
 
 #[tauri::command]
@@ -581,10 +599,15 @@ pub async fn cmd_search_global(
                         tl::enums::Peer::User(u) => Some(u.user_id),
                         tl::enums::Peer::Chat(c) => Some(c.chat_id),
                     };
+                    let duration_secs = doc.attributes.iter().find_map(|a| match a {
+                        tl::enums::DocumentAttribute::Video(v) => Some(v.duration.ceil() as u32),
+                        _ => None,
+                    });
                     files.push(FileMetadata {
                         id: m.id as i64, folder_id, name, size,
                         mime_type: Some(mime), file_ext: ext,
-                        created_at: m.date.to_string(), icon_type: "file".into()
+                        created_at: m.date.to_string(), icon_type: "file".into(),
+                        duration_secs,
                     });
                 }
             }

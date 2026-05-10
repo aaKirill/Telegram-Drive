@@ -22,6 +22,11 @@ export interface AppSettings {
     /** Folder where cross-device sync snapshots (td-sync.json) live.
      *  null = Saved Messages (default). Otherwise a [TD] folder id. */
     syncFolderId: number | null;
+    /** Number of columns in grid view on desktop / web-desktop. Mobile is
+     *  always 3 — the topbar control hides on small viewports. Per-device
+     *  (excluded from sync) since users tend to want different densities
+     *  on different screens. */
+    gridColumnsDesktop: number;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -35,6 +40,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     hideThumbnailsForNewFolders: false,
     killswitchEnabled: false,
     syncFolderId: null,
+    gridColumnsDesktop: 6,
 };
 
 // Module-level shared state. Without this, every component calling

@@ -11,6 +11,10 @@ export interface TelegramFile {
     folder_id?: number | null;
     created_at?: string;
     type?: 'folder' | 'file'; // implied icon_type
+    /** Video duration in seconds — set for video documents on both web
+     *  (extracted in mapMessageToFile) and desktop (commands/fs.rs).
+     *  Used by FileCard to render the iOS-Photos time pill. */
+    duration_secs?: number | null;
     // Add other fields if backend sends them
 }
 

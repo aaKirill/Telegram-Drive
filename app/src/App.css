@@ -3,26 +3,32 @@
 /* stylelint-disable at-rule-no-unknown */
 /* Dark Theme (Default) - Using Tailwind v4 @theme directive */
 @theme {
-  --color-telegram-bg: #0e1621;
-  --color-telegram-surface: #17212b;
-  --color-telegram-primary: #ffae00;
+  /* Slightly cooler / less navy. Surfaces step up by ~3% rather than the
+     prior ~6% jump so the sidebar and main panel don't feel like two
+     different shades fighting each other. */
+  --color-telegram-bg: #11161e;
+  --color-telegram-surface: #181f29;
+  /* Toned the primary down from saturated #ffae00 to a calmer warm amber.
+     Used for accents and selection — was bordering on neon at full
+     saturation, especially in the rings/glows it shows up in. */
+  --color-telegram-primary: #f0a030;
   --color-telegram-secondary: #2481cc;
-  --color-telegram-text: #ffffff;
+  --color-telegram-text: #f5f6f8;
   --color-telegram-subtext: #8e9fb3;
-  --color-telegram-border: rgba(255, 255, 255, 0.1);
-  --color-telegram-hover: rgba(255, 255, 255, 0.05);
+  --color-telegram-border: rgba(255, 255, 255, 0.07);
+  --color-telegram-hover: rgba(255, 255, 255, 0.04);
 }
 
 /* Light Theme Overrides */
 :root.light {
-  --color-telegram-bg: #f0f2f5;
+  --color-telegram-bg: #f4f5f7;
   --color-telegram-surface: #ffffff;
-  --color-telegram-primary: #e69500;
+  --color-telegram-primary: #d98a14;
   --color-telegram-secondary: #2481cc;
   --color-telegram-text: #1a1a1a;
   --color-telegram-subtext: #65676b;
-  --color-telegram-border: rgba(0, 0, 0, 0.1);
-  --color-telegram-hover: rgba(0, 0, 0, 0.03);
+  --color-telegram-border: rgba(0, 0, 0, 0.08);
+  --color-telegram-hover: rgba(0, 0, 0, 0.025);
 }
 
 body,
@@ -30,13 +36,39 @@ body,
   margin: 0;
   padding: 0;
   width: 100vw;
+  /* `100dvh` accounts for the iOS dynamic viewport (URL bar collapse / expand)
+     so the layout doesn't get clipped or leave a blank strip when the bar
+     animates. Falls back to 100vh on older browsers. */
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   background: var(--color-telegram-bg);
   color: var(--color-telegram-text);
   transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* iOS PWA / "Add to Home Screen" — the status bar (clock / battery) overlays
+   our top edge with `apple-mobile-web-app-status-bar-style: black-translucent`,
+   so the topbar must reserve space below it. Same for the bottom home-bar
+   safe area on the floating bulk-action bar. */
+.safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* iOS Safari auto-zooms when an input has font-size < 16px, then never
+   zooms back. Force >= 16px on mobile so the page never gets zoomed in
+   the first place. Desktop keeps its compact text-sm/text-xs styling. */
+@media (max-width: 767px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
 }
 
 /* Auth screen gradient background */

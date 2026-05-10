@@ -14,7 +14,13 @@ export function MoveToFolderModal({ folders, onClose, onSelect, activeFolderId }
     // first click on a freshly-rendered modal as a tap-zoom candidate.
     const tapStyle = { touchAction: 'manipulation' as const, WebkitTapHighlightColor: 'transparent' };
     return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4" onClick={onClose} style={tapStyle}>
+        <div
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+            // 100lvh keeps the modal centered in the full screen even when
+            // the iOS keyboard shrinks the visual viewport.
+            style={{ ...tapStyle, minHeight: '100lvh' }}
+            onClick={onClose}
+        >
             <div
                 className="bg-telegram-surface border border-telegram-border rounded-xl w-full max-w-sm shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
                 onClick={e => e.stopPropagation()}
@@ -28,7 +34,7 @@ export function MoveToFolderModal({ folders, onClose, onSelect, activeFolderId }
                     {activeFolderId !== null && (
                         <button
                             type="button"
-                            onClick={() => onSelect(null)}
+                            onClick={(e) => { e.stopPropagation(); onSelect(null); }}
                             style={tapStyle}
                             className="w-full flex items-center gap-3 px-3 py-3 rounded-lg text-sm text-left text-telegram-text hover:bg-telegram-hover active:bg-telegram-hover transition-colors"
                         >
@@ -45,7 +51,7 @@ export function MoveToFolderModal({ folders, onClose, onSelect, activeFolderId }
                             <button
                                 type="button"
                                 key={f.id}
-                                onClick={() => onSelect(f.id)}
+                                onClick={(e) => { e.stopPropagation(); onSelect(f.id); }}
                                 style={tapStyle}
                                 className="w-full flex items-center gap-3 px-3 py-3 rounded-lg text-sm text-left text-telegram-text hover:bg-telegram-hover active:bg-telegram-hover transition-colors"
                             >
