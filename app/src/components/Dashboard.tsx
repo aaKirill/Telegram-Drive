@@ -206,10 +206,10 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
 
     const {
-        handleDelete, handleBulkDelete, handleBulkDownload,
-        handleBulkMove, handleDownloadFolder, handleGlobalSearch
+        handleDelete, handleBulkDelete,
+        handleBulkMove, handleGlobalSearch
 
-    } = useFileOperations(activeFolderId, selectedIds, setSelectedIds, displayedFiles);
+    } = useFileOperations(activeFolderId, selectedIds, setSelectedIds);
 
     const {
         uploadQueue, setUploadQueue, handleManualUpload,
@@ -217,10 +217,22 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
         isDragging,
     } = useFileUpload(activeFolderId, store);
     const {
-        downloadQueue, queueDownload,
+        downloadQueue, queueDownload, queueBulkDownload,
         clearFinished: clearDownloads,
         cancelAll: cancelDownloads, cancelItem: cancelDownloadItem, retryItem: retryDownloadItem, dismissItem: dismissDownload,
     } = useFileDownload(store);
+
+    const handleBulkDownload = useCallback(async () => {
+        if (selectedIds.length === 0) return;
+        const targetFiles = displayedFiles.filter((f) => selectedIds.includes(f.id));
+        await queueBulkDownload(targetFiles, activeFolderId);
+        setSelectedIds([]);
+    }, [selectedIds, displayedFiles, queueBulkDownload, activeFolderId]);
+
+    const handleDownloadFolder = useCallback(async () => {
+        if (displayedFiles.length === 0) return;
+        await queueBulkDownload(displayedFiles, activeFolderId);
+    }, [displayedFiles, queueBulkDownload, activeFolderId]);
 
 
     const handleSelectAll = useCallback(() => {

@@ -75,10 +75,13 @@ export function useFileDownload(store: Store | null) {
         setDownloadQueue(q => q.map(i => i.id === item.id ? { ...i, status: 'downloading', progress: 0 } : i));
 
         try {
-            // If the user set a default download folder, save straight there
-            // (with the file's own name) and skip the OS save dialog.
+            // Bulk paths pre-compute a deduped savePath when queueing so we
+            // don't pop a save dialog per file. Single-file downloads still
+            // hit the appSettings.downloadPath shortcut or the OS dialog.
             let savePath: string | null;
-            if (appSettings.downloadPath) {
+            if (item.savePath) {
+                savePath = item.savePath;
+            } else if (appSettings.downloadPath) {
                 const sep = appSettings.downloadPath.includes('\\') ? '\\' : '/';
                 const trimmed = appSettings.downloadPath.endsWith(sep)
                     ? appSettings.downloadPath.slice(0, -1)
@@ -136,24 +139,52 @@ export function useFileDownload(store: Store | null) {
     };
 
     const queueBulkDownload = async (files: TelegramFile[], folderId: number | null) => {
-        const dirPath = await open({
-            directory: true,
-            multiple: false,
-            title: "Select Download Destination"
-        });
+        if (files.length === 0) return;
+        let dirPath: string | null;
+        if (appSettings.downloadPath) {
+            dirPath = appSettings.downloadPath;
+        } else {
+            dirPath = await open({
+                directory: true,
+                multiple: false,
+                title: "Select Download Destination"
+            }) as string | null;
+        }
         if (!dirPath) return;
 
-        for (const file of files) {
-            const newItem: DownloadItem = {
+        const sep = dirPath.includes('\\') ? '\\' : '/';
+        const trimmed = dirPath.endsWith(sep) ? dirPath.slice(0, -1) : dirPath;
+        // Telegram returns generic names (photo.jpg, video.mp4) for whole
+        // batches; without dedupe every item lands on the same path and
+        // only the last one survives. Dedupe against the existing queue
+        // too so back-to-back bulks into the same dir don't collide.
+        const used = new Set<string>(
+            downloadQueue
+                .filter(i => i.savePath && (i.status === 'pending' || i.status === 'downloading'))
+                .map(i => i.savePath as string)
+        );
+        const newItems: DownloadItem[] = files.map((file) => {
+            const dot = file.name.lastIndexOf('.');
+            const base = dot > 0 ? file.name.slice(0, dot) : file.name;
+            const ext = dot > 0 ? file.name.slice(dot) : '';
+            let candidate = `${trimmed}${sep}${file.name}`;
+            let n = 2;
+            while (used.has(candidate)) {
+                candidate = `${trimmed}${sep}${base} (${n})${ext}`;
+                n++;
+            }
+            used.add(candidate);
+            const finalName = candidate.slice(trimmed.length + sep.length);
+            return {
                 id: Math.random().toString(36).substr(2, 9),
                 messageId: file.id,
-                filename: file.name,
+                filename: finalName,
                 folderId,
-                status: 'pending'
+                savePath: candidate,
+                status: 'pending' as const,
             };
-            setDownloadQueue(prev => [...prev, newItem]);
-        }
-
+        });
+        setDownloadQueue(prev => [...prev, ...newItems]);
         toast.info(`Queued ${files.length} files for download`);
     };
 

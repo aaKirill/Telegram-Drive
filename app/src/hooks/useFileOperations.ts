@@ -9,7 +9,6 @@ export function useFileOperations(
     activeFolderId: number | null,
     selectedIds: number[],
     setSelectedIds: (ids: number[]) => void,
-    displayedFiles: TelegramFile[]
 ) {
     const queryClient = useQueryClient();
     const { confirm } = useConfirm();
@@ -78,31 +77,6 @@ export function useFileOperations(
         }
     }
 
-    const handleBulkDownload = async () => {
-        if (selectedIds.length === 0) return;
-        try {
-            const dirPath = await import('@tauri-apps/plugin-dialog').then(d => d.open({
-                directory: true, multiple: false, title: "Select Download Destination"
-            }));
-            if (!dirPath) return;
-            let successCount = 0;
-            const targetFiles = displayedFiles.filter((f) => selectedIds.includes(f.id));
-            toast.info(`Starting batch download of ${targetFiles.length} files...`);
-
-            for (const file of targetFiles) {
-                const filePath = `${dirPath}/${file.name}`;
-                try {
-                    await invoke('cmd_download_file', { messageId: file.id, savePath: filePath, folderId: activeFolderId });
-                    successCount++;
-                } catch (e) { }
-            }
-            toast.success(`Downloaded ${successCount} files.`);
-            setSelectedIds([]);
-        } catch (e) {
-            toast.error(`Bulk download failed: ${e}`);
-        }
-    }
-
     const handleBulkMove = async (targetFolderId: number | null, onSuccess?: () => void) => {
         if (selectedIds.length === 0) return;
         const movedIds = [...selectedIds];
@@ -142,38 +116,11 @@ export function useFileOperations(
         }
     };
 
-    const handleDownloadFolder = async () => {
-        if (displayedFiles.length === 0) {
-            toast.info("Folder is empty.");
-            return;
-        }
-        try {
-            const dirPath = await import('@tauri-apps/plugin-dialog').then(d => d.open({
-                directory: true, multiple: false, title: "Download Folder To..."
-            }));
-            if (!dirPath) return;
-            let successCount = 0;
-            toast.info(`Downloading folder contents (${displayedFiles.length} files)...`);
-            for (const file of displayedFiles) {
-                const filePath = `${dirPath}/${file.name}`;
-                try {
-                    await invoke('cmd_download_file', { messageId: file.id, savePath: filePath, folderId: activeFolderId });
-                    successCount++;
-                } catch (e) { }
-            }
-            toast.success(`Folder Download Complete: ${successCount} files.`);
-        } catch (e) {
-            toast.error("Error: " + e);
-        }
-    }
-
     return {
         handleDelete,
         handleBulkDelete,
         handleDownload,
-        handleBulkDownload,
         handleBulkMove,
-        handleDownloadFolder,
         handleGlobalSearch: async (query: string) => {
             try {
                 return await invoke<TelegramFile[]>('cmd_search_global', { query });
